@@ -1,6 +1,7 @@
 pub mod anchor;
 pub mod crypto;
 pub mod error;
+pub mod manifest;
 pub mod merkle;
 pub mod pipeline;
 pub mod sources;

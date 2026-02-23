@@ -6,6 +6,8 @@
 /// - Tier 2: Filecoin (cold archive with cryptographic storage proofs)
 /// - Tier 3: IPFS (content-addressed distribution layer)
 /// - Tier 4: Arweave (permanent manifest storage)
+pub mod arweave;
+pub mod filecoin;
 pub mod ipfs;
 pub mod storj;
 
