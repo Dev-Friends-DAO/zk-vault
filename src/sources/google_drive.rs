@@ -11,9 +11,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 
-use super::{
-    BoxAsyncRead, ChangeSet, DataSource, FileMetadata, SourceConfig, SourceState,
-};
+use super::{BoxAsyncRead, ChangeSet, DataSource, FileMetadata, SourceConfig, SourceState};
 use crate::error::{Result, VaultError};
 
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -157,7 +155,7 @@ impl DataSource for GoogleDrive {
             ])
             .send()
             .await
-            .map_err(|e| VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| VaultError::Io(std::io::Error::other(e)))?;
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -169,16 +167,12 @@ impl DataSource for GoogleDrive {
         let body = resp
             .bytes()
             .await
-            .map_err(|e| VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| VaultError::Io(std::io::Error::other(e)))?;
 
         Ok(body.to_vec())
     }
 
-    async fn detect_changes(
-        &self,
-        access_token: &str,
-        state: &SourceState,
-    ) -> Result<ChangeSet> {
+    async fn detect_changes(&self, access_token: &str, state: &SourceState) -> Result<ChangeSet> {
         // If no cursor, get initial page token and do full listing
         let page_token = match &state.sync_cursor {
             Some(cursor) => cursor.clone(),
@@ -190,9 +184,7 @@ impl DataSource for GoogleDrive {
                     .bearer_auth(access_token)
                     .send()
                     .await
-                    .map_err(|e| {
-                        VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
-                    })?
+                    .map_err(|e| VaultError::Io(std::io::Error::other(e)))?
                     .json()
                     .await
                     .map_err(|e| {
@@ -219,7 +211,7 @@ impl DataSource for GoogleDrive {
                 ])
                 .send()
                 .await
-                .map_err(|e| VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+                .map_err(|e| VaultError::Io(std::io::Error::other(e)))?
                 .json()
                 .await
                 .map_err(|e| VaultError::Serialization(format!("Failed to parse changes: {e}")))?;
@@ -266,11 +258,7 @@ impl DataSource for GoogleDrive {
         Ok(change_set)
     }
 
-    async fn download(
-        &self,
-        access_token: &str,
-        file_id: &str,
-    ) -> Result<BoxAsyncRead> {
+    async fn download(&self, access_token: &str, file_id: &str) -> Result<BoxAsyncRead> {
         let resp = self
             .client
             .get(format!("{DRIVE_API_BASE}/files/{file_id}"))
@@ -278,22 +266,19 @@ impl DataSource for GoogleDrive {
             .query(&[("alt", "media")])
             .send()
             .await
-            .map_err(|e| VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| VaultError::Io(std::io::Error::other(e)))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(VaultError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Download failed ({status}): {body}"),
-            )));
+            return Err(VaultError::Io(std::io::Error::other(format!(
+                "Download failed ({status}): {body}"
+            ))));
         }
 
         let stream = resp.bytes_stream();
         let reader = tokio_util::io::StreamReader::new(
-            stream.map(|result| {
-                result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-            }),
+            stream.map(|result| result.map_err(std::io::Error::other)),
         );
 
         Ok(Box::pin(reader))

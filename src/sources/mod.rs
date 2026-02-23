@@ -100,17 +100,9 @@ pub trait DataSource: Send + Sync {
 
     /// Detect changes since the last sync.
     /// Uses the access token (already decrypted by the client).
-    async fn detect_changes(
-        &self,
-        access_token: &str,
-        state: &SourceState,
-    ) -> Result<ChangeSet>;
+    async fn detect_changes(&self, access_token: &str, state: &SourceState) -> Result<ChangeSet>;
 
     /// Download a file by its source-specific ID.
     /// Returns a streaming async reader.
-    async fn download(
-        &self,
-        access_token: &str,
-        file_id: &str,
-    ) -> Result<BoxAsyncRead>;
+    async fn download(&self, access_token: &str, file_id: &str) -> Result<BoxAsyncRead>;
 }

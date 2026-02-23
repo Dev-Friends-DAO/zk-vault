@@ -83,7 +83,9 @@ impl HybridSignature {
         }
         let mldsa_len = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
         if data.len() != 4 + mldsa_len + 64 {
-            return Err(VaultError::Decryption("Invalid hybrid signature length".into()));
+            return Err(VaultError::Decryption(
+                "Invalid hybrid signature length".into(),
+            ));
         }
         let mldsa_signature = data[4..4 + mldsa_len].to_vec();
         let mut ed25519_signature = [0u8; 64];
@@ -102,11 +104,7 @@ pub struct HybridVerifyingKey {
 }
 
 /// Sign a message with both ML-DSA-65 and Ed25519.
-pub fn sign(
-    mldsa_sk: &[u8],
-    ed25519_sk: &SigningKey,
-    message: &[u8],
-) -> Result<HybridSignature> {
+pub fn sign(mldsa_sk: &[u8], ed25519_sk: &SigningKey, message: &[u8]) -> Result<HybridSignature> {
     // ML-DSA-65 signature
     let sk = dilithium3::SecretKey::from_bytes(mldsa_sk)
         .map_err(|e| VaultError::Encryption(format!("Invalid ML-DSA-65 secret key: {e:?}")))?;
@@ -122,11 +120,7 @@ pub fn sign(
 }
 
 /// Verify a hybrid signature. Both signatures must be valid.
-pub fn verify(
-    vk: &HybridVerifyingKey,
-    message: &[u8],
-    signature: &HybridSignature,
-) -> Result<()> {
+pub fn verify(vk: &HybridVerifyingKey, message: &[u8], signature: &HybridSignature) -> Result<()> {
     // Verify ML-DSA-65
     let mldsa_pk = dilithium3::PublicKey::from_bytes(&vk.mldsa_pk)
         .map_err(|_| VaultError::SignatureVerification)?;

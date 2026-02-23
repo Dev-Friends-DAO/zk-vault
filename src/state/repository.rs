@@ -10,7 +10,7 @@ use super::models::*;
 use crate::error::{Result, VaultError};
 
 fn db_err(e: sqlx::Error) -> VaultError {
-    VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+    VaultError::Io(std::io::Error::other(e))
 }
 
 // ── Users ──
@@ -173,20 +173,14 @@ pub async fn get_source_connection(
     .map_err(db_err)
 }
 
-pub async fn update_sync_cursor(
-    pool: &PgPool,
-    connection_id: Uuid,
-    cursor: &str,
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE source_connections SET sync_cursor = $2, last_sync_at = $3 WHERE id = $1",
-    )
-    .bind(connection_id)
-    .bind(cursor)
-    .bind(Utc::now())
-    .execute(pool)
-    .await
-    .map_err(db_err)?;
+pub async fn update_sync_cursor(pool: &PgPool, connection_id: Uuid, cursor: &str) -> Result<()> {
+    sqlx::query("UPDATE source_connections SET sync_cursor = $2, last_sync_at = $3 WHERE id = $1")
+        .bind(connection_id)
+        .bind(cursor)
+        .bind(Utc::now())
+        .execute(pool)
+        .await
+        .map_err(db_err)?;
 
     Ok(())
 }
@@ -221,10 +215,7 @@ pub async fn create_anchor_receipt(
     Ok(receipt)
 }
 
-pub async fn get_latest_anchor(
-    pool: &PgPool,
-    chain: &str,
-) -> Result<Option<AnchorReceipt>> {
+pub async fn get_latest_anchor(pool: &PgPool, chain: &str) -> Result<Option<AnchorReceipt>> {
     sqlx::query_as::<_, AnchorReceipt>(
         "SELECT * FROM anchor_receipts WHERE chain = $1 ORDER BY anchored_at DESC LIMIT 1",
     )
@@ -236,6 +227,7 @@ pub async fn get_latest_anchor(
 
 // ── Backed Up Files ──
 
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_backed_up_file(
     pool: &PgPool,
     user_id: Uuid,

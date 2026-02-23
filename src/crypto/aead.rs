@@ -1,3 +1,5 @@
+use crate::crypto::sensitive::SensitiveBytes32;
+use crate::error::{Result, VaultError};
 /// XChaCha20-Poly1305 AEAD encryption for file content.
 ///
 /// Each file gets a unique random key and nonce.
@@ -8,8 +10,6 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
 };
 use rand::RngCore;
-use crate::crypto::sensitive::SensitiveBytes32;
-use crate::error::{Result, VaultError};
 
 pub const NONCE_LEN: usize = 24;
 pub const KEY_LEN: usize = 32;
@@ -38,8 +38,8 @@ pub fn encrypt(
     plaintext: &[u8],
     aad: &[u8],
 ) -> Result<([u8; NONCE_LEN], Vec<u8>)> {
-    let cipher =
-        XChaCha20Poly1305::new_from_slice(key.as_bytes()).map_err(|e| VaultError::Encryption(e.to_string()))?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key.as_bytes())
+        .map_err(|e| VaultError::Encryption(e.to_string()))?;
 
     let nonce_bytes = generate_nonce();
     let nonce = XNonce::from_slice(&nonce_bytes);
@@ -63,8 +63,8 @@ pub fn decrypt(
     ciphertext: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>> {
-    let cipher =
-        XChaCha20Poly1305::new_from_slice(key.as_bytes()).map_err(|e| VaultError::Decryption(e.to_string()))?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key.as_bytes())
+        .map_err(|e| VaultError::Decryption(e.to_string()))?;
 
     let xnonce = XNonce::from_slice(nonce);
 
@@ -87,8 +87,8 @@ pub fn encrypt_with_nonce(
     plaintext: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>> {
-    let cipher =
-        XChaCha20Poly1305::new_from_slice(key.as_bytes()).map_err(|e| VaultError::Encryption(e.to_string()))?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key.as_bytes())
+        .map_err(|e| VaultError::Encryption(e.to_string()))?;
 
     let xnonce = XNonce::from_slice(nonce);
 

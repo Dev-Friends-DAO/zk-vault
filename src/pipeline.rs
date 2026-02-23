@@ -75,6 +75,7 @@ impl Default for PipelineConfig {
 /// - `secondary_storage`: Optional secondary backend (e.g., IPFS)
 /// - `hybrid_pk`: User's hybrid public key for KEM key wrapping
 /// - `config`: Pipeline configuration
+#[allow(clippy::too_many_arguments)]
 pub async fn run_backup(
     user_id: Uuid,
     source: &dyn DataSource,
@@ -172,6 +173,7 @@ pub async fn run_backup(
 }
 
 /// Process a single file: download → encrypt → upload.
+#[allow(clippy::too_many_arguments)]
 async fn process_file(
     user_id: Uuid,
     source: &dyn DataSource,
@@ -189,7 +191,7 @@ async fn process_file(
     reader
         .read_to_end(&mut plaintext)
         .await
-        .map_err(|e| VaultError::Io(e))?;
+        .map_err(VaultError::Io)?;
 
     let original_size = plaintext.len() as u64;
 

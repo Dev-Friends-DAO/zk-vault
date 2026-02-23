@@ -50,7 +50,7 @@ impl MerkleTree {
         // Build tree bottom-up
         while levels.last().unwrap().len() > 1 {
             let current = levels.last().unwrap();
-            let mut next = Vec::with_capacity((current.len() + 1) / 2);
+            let mut next = Vec::with_capacity(current.len().div_ceil(2));
 
             let mut i = 0;
             while i + 1 < current.len() {
@@ -80,7 +80,7 @@ impl MerkleTree {
 
         while levels.last().unwrap().len() > 1 {
             let current = levels.last().unwrap();
-            let mut next = Vec::with_capacity((current.len() + 1) / 2);
+            let mut next = Vec::with_capacity(current.len().div_ceil(2));
 
             let mut i = 0;
             while i + 1 < current.len() {

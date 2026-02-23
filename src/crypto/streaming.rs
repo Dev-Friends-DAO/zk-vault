@@ -28,7 +28,7 @@ pub fn encrypt_chunked(
     base_aad: &[u8],
 ) -> Result<([u8; NONCE_LEN], Vec<u8>)> {
     let base_nonce = aead::generate_nonce();
-    let total_chunks = (plaintext.len() + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    let total_chunks = plaintext.len().div_ceil(CHUNK_SIZE);
     let total_chunks = if total_chunks == 0 { 1 } else { total_chunks };
 
     let mut output = Vec::new();
@@ -72,8 +72,7 @@ pub fn decrypt_chunked(
         if offset + 4 > data.len() {
             return Err(VaultError::Decryption("Truncated chunk header".into()));
         }
-        let chunk_len =
-            u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        let chunk_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
 
         if offset + chunk_len > data.len() {

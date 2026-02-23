@@ -26,7 +26,7 @@ impl Database {
             .max_connections(10)
             .connect(database_url)
             .await
-            .map_err(|e| VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| VaultError::Io(std::io::Error::other(e)))?;
 
         Ok(Self { pool })
     }
@@ -36,12 +36,7 @@ impl Database {
         sqlx::migrate!("./migrations")
             .run(&self.pool)
             .await
-            .map_err(|e| {
-                VaultError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Migration failed: {e}"),
-                ))
-            })
+            .map_err(|e| VaultError::Io(std::io::Error::other(format!("Migration failed: {e}"))))
     }
 
     /// Get a reference to the underlying pool.

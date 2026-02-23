@@ -7,9 +7,11 @@
 /// Both shared secrets are combined via BLAKE3 keyed hash with domain separation.
 /// If either algorithm is broken, the other still protects the data.
 use pqcrypto_kyber::kyber768;
-use pqcrypto_traits::kem::{Ciphertext as _, PublicKey as PqPublicKey, SecretKey as PqSecretKey, SharedSecret as _};
-use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey, StaticSecret};
+use pqcrypto_traits::kem::{
+    Ciphertext as _, PublicKey as PqPublicKey, SecretKey as PqSecretKey, SharedSecret as _,
+};
 use rand::rngs::OsRng;
+use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
 use crate::crypto::aead;
@@ -55,6 +57,7 @@ impl Drop for KemKeyPair {
 /// Key pair for X25519.
 pub struct X25519KeyPair {
     pub public_key: X25519PublicKey,
+    #[allow(dead_code)]
     secret_key: StaticSecret,
 }
 
@@ -163,12 +166,7 @@ pub fn decapsulate(
     let wrapping_key = combine_shared_secrets(ss_kem.as_bytes(), ss_x25519.as_bytes());
 
     // Unwrap the symmetric key
-    let sym_key_bytes = aead::decrypt(
-        &wrapping_key,
-        &KEY_WRAP_NONCE,
-        wrapped_key,
-        KEY_WRAP_AAD,
-    )?;
+    let sym_key_bytes = aead::decrypt(&wrapping_key, &KEY_WRAP_NONCE, wrapped_key, KEY_WRAP_AAD)?;
 
     SensitiveBytes32::from_slice(&sym_key_bytes)
         .ok_or_else(|| VaultError::Decryption("Unwrapped key is not 32 bytes".to_string()))

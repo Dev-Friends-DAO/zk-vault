@@ -78,7 +78,7 @@ impl StorageBackend for StorjBackend {
             .content_length(data.len() as i64)
             .send()
             .await
-            .map_err(|e| VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| VaultError::Io(std::io::Error::other(e)))?;
 
         Ok(UploadResult {
             storage_key: key.to_string(),
@@ -95,13 +95,13 @@ impl StorageBackend for StorjBackend {
             .key(key)
             .send()
             .await
-            .map_err(|e| VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| VaultError::Io(std::io::Error::other(e)))?;
 
         let bytes = resp
             .body
             .collect()
             .await
-            .map_err(|e| VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+            .map_err(|e| VaultError::Io(std::io::Error::other(e)))?
             .into_bytes();
 
         Ok(bytes.to_vec())
@@ -122,10 +122,7 @@ impl StorageBackend for StorjBackend {
                 if service_err.is_not_found() {
                     Ok(false)
                 } else {
-                    Err(VaultError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        service_err,
-                    )))
+                    Err(VaultError::Io(std::io::Error::other(service_err)))
                 }
             }
         }
@@ -138,7 +135,7 @@ impl StorageBackend for StorjBackend {
             .key(key)
             .send()
             .await
-            .map_err(|e| VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| VaultError::Io(std::io::Error::other(e)))?;
 
         Ok(())
     }
@@ -161,7 +158,7 @@ impl StorageBackend for StorjBackend {
             let resp = request
                 .send()
                 .await
-                .map_err(|e| VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                .map_err(|e| VaultError::Io(std::io::Error::other(e)))?;
 
             if let Some(contents) = resp.contents {
                 for obj in contents {

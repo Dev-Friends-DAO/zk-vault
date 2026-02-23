@@ -1,9 +1,9 @@
-/// BLAKE3 hashing utilities for zk-vault.
-///
-/// BLAKE3 is used throughout the system for:
-/// - Merkle tree construction (with domain separation)
-/// - Key combining in hybrid KEM
-/// - File integrity verification
+//! BLAKE3 hashing utilities for zk-vault.
+//!
+//! BLAKE3 is used throughout the system for:
+//! - Merkle tree construction (with domain separation)
+//! - Key combining in hybrid KEM
+//! - File integrity verification
 
 /// Hash arbitrary data with BLAKE3.
 pub fn hash(data: &[u8]) -> [u8; 32] {

@@ -155,7 +155,10 @@ mod tests {
 
         for id in &ids {
             let proof = st.prove_user(id).unwrap();
-            assert!(verify_user_proof(&super_root, &proof), "Failed for user {id}");
+            assert!(
+                verify_user_proof(&super_root, &proof),
+                "Failed for user {id}"
+            );
         }
     }
 

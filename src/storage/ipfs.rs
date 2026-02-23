@@ -69,14 +69,13 @@ impl StorageBackend for IpfsBackend {
             .multipart(form)
             .send()
             .await
-            .map_err(|e| VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| VaultError::Io(std::io::Error::other(e)))?;
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(VaultError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("IPFS add failed: {body}"),
-            )));
+            return Err(VaultError::Io(std::io::Error::other(format!(
+                "IPFS add failed: {body}"
+            ))));
         }
 
         let add_resp: IpfsAddResponse = resp
@@ -99,20 +98,19 @@ impl StorageBackend for IpfsBackend {
             .query(&[("arg", key)])
             .send()
             .await
-            .map_err(|e| VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| VaultError::Io(std::io::Error::other(e)))?;
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(VaultError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("IPFS cat failed: {body}"),
-            )));
+            return Err(VaultError::Io(std::io::Error::other(format!(
+                "IPFS cat failed: {body}"
+            ))));
         }
 
         let bytes = resp
             .bytes()
             .await
-            .map_err(|e| VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| VaultError::Io(std::io::Error::other(e)))?;
 
         Ok(bytes.to_vec())
     }
@@ -125,7 +123,7 @@ impl StorageBackend for IpfsBackend {
             .query(&[("arg", key)])
             .send()
             .await
-            .map_err(|e| VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| VaultError::Io(std::io::Error::other(e)))?;
 
         Ok(resp.status().is_success())
     }
@@ -151,7 +149,7 @@ impl StorageBackend for IpfsBackend {
             .query(&[("type", "recursive")])
             .send()
             .await
-            .map_err(|e| VaultError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| VaultError::Io(std::io::Error::other(e)))?;
 
         if !resp.status().is_success() {
             return Ok(vec![]);
