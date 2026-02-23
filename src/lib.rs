@@ -4,6 +4,7 @@ pub mod error;
 pub mod manifest;
 pub mod merkle;
 pub mod pipeline;
+pub mod server;
 pub mod sources;
 pub mod state;
 pub mod storage;
