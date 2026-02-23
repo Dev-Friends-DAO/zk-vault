@@ -48,6 +48,10 @@ async-trait = "0.1"
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"] }
 
+# Blockchain anchoring
+bitcoin = { version = "0.32", features = ["serde", "rand-std"] }
+alloy = { version = "1", features = ["providers", "signers", "signer-local", "network", "consensus"] }
+
 # Object storage (S3-compatible for Storj)
 aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
@@ -56,6 +60,7 @@ aws-types = "1"
 
 # Utilities
 rand = "0.8"
+hex = "0.4"
 thiserror = "2"
 anyhow = "1"
 uuid = { version = "1", features = ["v7", "serde"] }

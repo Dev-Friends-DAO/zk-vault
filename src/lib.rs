@@ -1,3 +1,4 @@
+pub mod anchor;
 pub mod crypto;
 pub mod error;
 pub mod merkle;
