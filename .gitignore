@@ -1,0 +1,14 @@
+/target
+Cargo.lock
+*.swp
+*.swo
+*~
+.DS_Store
+.env
+*.pem
+*.key
+*.enc
+state.db
+state.db-*
+/staging/
+/tmp/
