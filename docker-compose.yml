@@ -1,0 +1,63 @@
+services:
+  # ── API Server ──────────────────────────────────────────
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgres://vault:vault@postgres:5432/zk_vault
+      JWT_SECRET: dev-secret-change-in-production
+      RUST_LOG: zk_vault=debug,tower_http=debug
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── PostgreSQL ──────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vault
+      POSTGRES_PASSWORD: vault
+      POSTGRES_DB: zk_vault
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vault -d zk_vault"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis (job queue & rate limiting) ───────────────────
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Batch Worker (Super Merkle Tree + Anchoring) ────────
+  batch:
+    build: .
+    command: ["batch", "--database-url", "postgres://vault:vault@postgres:5432/zk_vault"]
+    environment:
+      DATABASE_URL: postgres://vault:vault@postgres:5432/zk_vault
+      RUST_LOG: zk_vault=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Run on schedule via external cron or orchestrator.
+    # For local dev, start manually: docker compose run batch
+    profiles:
+      - batch
+
+volumes:
+  pgdata:
+  redisdata:

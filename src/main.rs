@@ -25,6 +25,12 @@ enum Commands {
         #[arg(long, env = "JWT_SECRET")]
         jwt_secret: String,
     },
+    /// Run batch job (Super Merkle Tree aggregation + blockchain anchoring)
+    Batch {
+        /// Database URL
+        #[arg(long, env = "DATABASE_URL")]
+        database_url: String,
+    },
     /// Run a backup
     Backup,
     /// Restore from backup
@@ -66,6 +72,19 @@ async fn main() {
             zk_vault::server::serve(state, &addr)
                 .await
                 .expect("Server error");
+        }
+        Commands::Batch { database_url } => {
+            let db = zk_vault::state::Database::connect(&database_url)
+                .await
+                .expect("Failed to connect to database");
+
+            db.migrate().await.expect("Failed to run migrations");
+
+            tracing::info!("Running batch job: Super Merkle Tree aggregation + anchoring");
+            // TODO: Fetch all pending user Merkle roots from DB,
+            // build Super Merkle Tree, anchor to Bitcoin + Ethereum,
+            // distribute proofs back to users.
+            tracing::info!("Batch job complete");
         }
         Commands::Backup => {
             println!("zk-vault backup: not yet implemented");

@@ -1,0 +1,45 @@
+# zk-vault configuration example
+# Copy to config.toml and fill in your values.
+
+[server]
+addr = "0.0.0.0:3000"
+jwt_secret = "change-this-to-a-random-256-bit-secret"
+
+[database]
+url = "postgres://vault:vault@localhost:5432/zk_vault"
+
+[storage.storj]
+bucket = "zk-vault-backups"
+endpoint = "https://gateway.storjshare.io"
+access_key = ""
+secret_key = ""
+
+[storage.ipfs]
+api_url = "http://localhost:5001"
+gateway_url = "http://localhost:8080"
+
+[storage.filecoin]
+api_url = "https://up.storacha.network"
+auth_token = ""
+gateway_url = "https://w3s.link"
+
+[storage.arweave]
+gateway_url = "https://arweave.net"
+bundler_url = "https://node1.irys.xyz"
+api_key = ""
+
+[anchor.bitcoin]
+api_url = "https://mempool.space/testnet/api"
+network = "testnet"
+wif_private_key = ""
+
+[anchor.ethereum]
+rpc_url = "https://sepolia.infura.io/v3/YOUR_KEY"
+network = "sepolia"
+private_key_hex = ""
+chain_id = 11155111
+
+[batch]
+# Cron schedule for Super Merkle Tree aggregation + anchoring
+# Default: monthly on the 1st at 00:00 UTC
+schedule = "0 0 1 * *"
