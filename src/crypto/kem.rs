@@ -57,7 +57,6 @@ impl Drop for KemKeyPair {
 /// Key pair for X25519.
 pub struct X25519KeyPair {
     pub public_key: X25519PublicKey,
-    #[allow(dead_code)]
     secret_key: StaticSecret,
 }
 
@@ -69,6 +68,10 @@ impl X25519KeyPair {
             public_key: public,
             secret_key: secret,
         }
+    }
+
+    pub fn secret_key(&self) -> &StaticSecret {
+        &self.secret_key
     }
 }
 
@@ -196,7 +199,7 @@ mod tests {
         // Decapsulate
         let recovered = decapsulate(
             kem_kp.secret_key_bytes(),
-            &x25519_kp.secret_key,
+            x25519_kp.secret_key(),
             &encap.kem_ciphertext,
             &encap.eph_x25519_pk,
             &encap.wrapped_key,
@@ -223,7 +226,7 @@ mod tests {
         // Try decapsulating with wrong KEM key
         let result = decapsulate(
             kem_kp2.secret_key_bytes(),
-            &x25519_kp.secret_key,
+            x25519_kp.secret_key(),
             &encap.kem_ciphertext,
             &encap.eph_x25519_pk,
             &encap.wrapped_key,
@@ -248,7 +251,7 @@ mod tests {
         // Try decapsulating with wrong X25519 key
         let result = decapsulate(
             kem_kp.secret_key_bytes(),
-            &x25519_kp2.secret_key,
+            x25519_kp2.secret_key(),
             &encap.kem_ciphertext,
             &encap.eph_x25519_pk,
             &encap.wrapped_key,
