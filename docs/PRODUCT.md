@@ -27,6 +27,62 @@ The product is born from a personal need: backing up important Google Drive data
 | If operator disappears | Data at risk | Data at risk | Data at risk | Data at risk | **Local backup + chain + Filecoin** |
 | Trust model | Trust the company | Trust the company | Trust the company | Trust the company | **Trust mathematics** |
 
+### Competitive Landscape
+
+zk-vault operates at the intersection of post-quantum cryptography, dedicated backup chains, and decentralized storage — a combination no existing project replicates.
+
+#### Web3 storage competitors
+
+|  | **zk-vault** | Jackal Protocol | Lighthouse | Walrus (Sui) | Crust Network | Lumera |
+|---|---|---|---|---|---|---|
+| Own chain | **BFT (PoA→DPoS)** | Cosmos L1 (PoS) | No (on Filecoin) | Tied to Sui | Polkadot parachain | Cosmos L1 |
+| PQ encryption | **ML-KEM-768 + X25519** | No | No | No | No | No |
+| Multi-mode storage | **A (personal) / B (native) / C (Filecoin)** | Chain-only | Filecoin-only | Network-only | IPFS-only | Network-only |
+| Layer 0 (local-first) | **Always present, chain-independent** | No | No | No | No | No |
+| BTC + ETH anchoring | **Per-backup Merkle root** | Babylon (chain-level security) | No | No | No | No |
+| Endowment model | **On-chain module (Kryder's Law)** | Prepaid subscription | Pay-once-store-forever | Token rewards | Standard fees | Pay-once-store-forever |
+| Guardian recovery | **Shamir + MPC + time-lock + Dead Man's Switch + ZKP** | No | No | No | No | No |
+| ZKP system | **STARKs via risc0 (PQ-safe, planned)** | No | No | No | Researching ZK | No |
+| Composability | **Insurance, legal, compliance verification** | IBC + Outposts | SDK | Move contracts | Cross-chain storage | Limited |
+| Migration path | **Mode A→B/C without re-encryption** | No | No | No | No | No |
+
+**Jackal Protocol** is the closest competitor — a Cosmos appchain with a Google Drive-like UI (Jackal Vault), Proof-of-Persistence, and IBC composability. However, Jackal lacks post-quantum cryptography, Layer 0 independence, guardian recovery, BTC/ETH data-level anchoring, and a personal-to-chain migration path.
+
+**Lighthouse** offers pay-once-store-forever on Filecoin with threshold encryption (Kavach/BLS) and token-gated access. Strong on permanence and encryption, but no own chain, no PQ, no guardian recovery, and no local-first mode.
+
+**Lumera Protocol** (formerly Pastel Network) has the closest endowment economics — Cascade provides pay-once-store-forever with self-healing on its Cosmos L1. However, it targets AI data permanence, not personal backup, and lacks every other zk-vault pillar.
+
+#### PQ-capable chains (not backup products)
+
+| | QANplatform | QRL | Algorand |
+|---|---|---|---|
+| PQ signatures | CRYSTALS-Dilithium | XMSS → SPHINCS+ | Falcon-1024 |
+| PQ encryption for data | No | No | No |
+| Storage / backup | No | No | No |
+| Purpose | General L1 | General ledger | General L1 |
+
+These chains have post-quantum signatures for transaction security but none provides encrypted storage, backup functionality, or data-level PQ encryption. The combination of **PQ encryption + dedicated backup chain** is a complete whitespace.
+
+#### Centralized backup products
+
+|  | Google Drive | 1Password | Backblaze | Tarsnap |
+|---|---|---|---|---|
+| Encryption | Server-side | Client-side | Client-side | Client-side |
+| PQ encryption | No | No | No | No |
+| Single point of failure | Google | AgileBits | Backblaze | Tarsnap |
+| If operator disappears | Data at risk | Data at risk | Data at risk | Data at risk |
+| Trust model | Trust the company | Trust the company | Trust the company | Trust the company |
+
+All centralized products share the same fundamental weakness: trust a single company. zk-vault replaces company trust with mathematical guarantees.
+
+#### Key gaps in the market
+
+1. **PQ encryption + backup chain**: No storage chain uses post-quantum cryptography. No PQ chain has storage functionality.
+2. **Local-first with chain upgrade**: Every web3 storage project is network-first. None offers an independent local mode with seamless chain migration.
+3. **Guardian recovery for storage**: Social/device recovery exists for wallets (ERC-4337) but not for encrypted backup systems.
+4. **STARK-based backup verification**: risc0 zkVM is production-ready, but no storage project uses STARKs for backup integrity proofs or recursive proof aggregation.
+5. **Dual-chain data anchoring**: Projects anchor to at most one chain. Per-backup Merkle root anchoring to both Bitcoin and Ethereum is not done by any competitor.
+
 ### The "zk" in zk-vault
 
 Today, "zk" refers to our **zero-knowledge architecture** — the system is designed so that no server, validator, or storage provider ever has access to plaintext data. All encryption and decryption happens on the user's device.

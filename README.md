@@ -10,6 +10,26 @@ zk-vault encrypts your important data on your device with post-quantum cryptogra
 
 **"zk" means:** Today, zero-knowledge architecture — the system never accesses your plaintext. In the future, zero-knowledge proofs will be integrated to enable cryptographic verification without revealing data. See [docs/PRODUCT.md](docs/PRODUCT.md) for the full vision.
 
+## Competitive Landscape
+
+No existing project combines all of zk-vault's pillars. The closest competitors each cover only a subset:
+
+| | zk-vault | Jackal Protocol | Lighthouse | Storj | Filecoin | Lumera |
+|---|---|---|---|---|---|---|
+| Own dApp chain | **Yes (BFT, PoA→DPoS)** | Cosmos L1 | No (on Filecoin) | No | Yes (own chain) | Cosmos L1 |
+| PQ hybrid encryption | **ML-KEM-768 + X25519** | No | No | No | No | No |
+| Multi-mode (A/B/C) | **Personal + Native + Filecoin** | Chain-only | Filecoin-only | Centralized | Filecoin-only | Chain-only |
+| Layer 0 (local-first) | **Always independent** | No | No | No | No | No |
+| BTC + ETH anchoring | **Dual-chain Merkle root** | Babylon (chain-level) | No | No | No | No |
+| Endowment (pay-once) | **On-chain module** | Prepaid subscription | Yes | No | No (deals expire) | Yes |
+| Guardian recovery | **Shamir + MPC + ZKP** | No | No | No | No | No |
+| ZKP (STARK, PQ-safe) | **Planned (risc0)** | No | No | No | zk-SNARKs (not PQ) | No |
+| Migration path | **Mode A→B/C, no re-encrypt** | No | No | No | No | No |
+
+The combination of post-quantum cryptography with a purpose-built backup chain is a complete whitespace — PQ chains (QRL, QANplatform) are general-purpose ledgers, while storage chains (Jackal, Crust, Walrus) use classical cryptography only.
+
+See [docs/PRODUCT.md](docs/PRODUCT.md) for detailed competitive analysis.
+
 ## Architecture
 
 zk-vault works in two modes: **Personal Mode** for standalone use, and **Chain Mode** for full web3 capabilities. Start personal, go networked when you want stronger guarantees.
