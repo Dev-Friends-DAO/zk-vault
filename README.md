@@ -12,13 +12,36 @@ zk-vault encrypts your important data on your device with post-quantum cryptogra
 
 ## Architecture
 
+zk-vault works in two modes: **Personal Mode** for standalone use, and **Chain Mode** for full web3 capabilities. Start personal, go networked when you want stronger guarantees.
+
+### Personal Mode (Mode A)
+
 ```
 +---------------------------------------------------------------+
 |                         CLIENT                                 |
 |  Data Sources --> PQ Encryption --> Round-trip Verification    |
 |                                                                |
 |  Layer 0: Local Encrypted Backup (USB / External HDD / NAS)   |
-|           Always present. Independent of all networks.         |
++-------------------------------+-------------------------------+
+                                |
+                                v
+                  +----------------------------+
+                  |   Storage Provider         |
+                  |   S3 / GCS / Azure Blob /  |
+                  |   Backblaze B2 / MinIO     |
+                  +----------------------------+
+```
+
+No chain, no token, no validators. Encrypt locally, push to any S3-compatible storage provider.
+
+### Chain Mode (Mode B / Mode C)
+
+```
++---------------------------------------------------------------+
+|                         CLIENT                                 |
+|  Data Sources --> PQ Encryption --> Round-trip Verification    |
+|                                                                |
+|  Layer 0: Local Encrypted Backup (USB / External HDD / NAS)   |
 +-------------------------------+-------------------------------+
                                 |
                                 v
@@ -46,9 +69,27 @@ zk-vault encrypts your important data on your device with post-quantum cryptogra
 +-------------------+      +--------------------+
 ```
 
+### Why Chain Mode
+
+Personal Mode is fully functional on its own. Chain Mode adds guarantees that are impossible to achieve alone:
+
+| | Personal (A) | Chain (B/C) |
+|---|---|---|
+| PQ encryption | Yes | Yes |
+| Local backup | Yes | Yes |
+| Storage verification | Trust the provider | BFT / Filecoin PoSt |
+| Data integrity proof | Local hash chain | BTC/ETH anchoring |
+| Single point of failure | Provider + local | None |
+| Key recovery | Unrecoverable if lost | Guardian network |
+| Permanent storage | Provider-dependent | Endowment model |
+| Multi-device sync | Manual | Chain state |
+
+Data encrypted in Personal Mode is fully compatible with Chain Mode — migration requires no re-encryption.
+
 | Component | Role |
 |---|---|
 | Local (Layer 0) | Safety net — independent of all crypto-economics |
+| Storage Provider (Mode A) | Simple cloud storage for encrypted data |
 | zk-vault Chain | State management + storage + coordination |
 | Filecoin | External verified storage (user's choice) |
 | BTC / ETH | Immutable proof of data integrity |
@@ -102,16 +143,17 @@ Files larger than 64 KiB use streaming encryption with per-chunk nonces (`base_n
 
 Users select their storage mode:
 
-| | Mode B (Native) | Mode C (Filecoin) |
-|---|---|---|
-| Data stored by | Chain validators | Filecoin Storage Providers |
-| Verification | BFT consensus | PoSt (zk-SNARK) |
-| Speed | Fast (direct access) | Slower (IPFS gateway) |
-| Best for | Smaller data, fast access | Large data, maximum distribution |
+| | Mode A (Personal) | Mode B (Native) | Mode C (Filecoin) |
+|---|---|---|---|
+| Requires chain | No | Yes | Yes |
+| Data stored by | Cloud provider | Chain validators | Filecoin Storage Providers |
+| Verification | Local hash chain | BFT consensus | PoSt (zk-SNARK) |
+| Speed | Provider-dependent | Fast (direct access) | Slower (IPFS gateway) |
+| Best for | Personal use, quick start | Smaller data, fast access | Large data, maximum distribution |
 
-Both modes can be used simultaneously for critical data.
+Mode B and Mode C can be used simultaneously for critical data.
 
-Layer 0 (local encrypted backup) is always independent of both modes.
+Layer 0 (local encrypted backup) is always independent of all modes.
 
 ## Anchoring
 
@@ -133,7 +175,7 @@ All users' roots are batched into a single Super Merkle Tree, so one transaction
 | PQ algorithm break | X25519 + Ed25519 classical fallback |
 | Network interception | Client-side encryption before transmission |
 | Validator compromise | Zero-knowledge architecture: ciphertext only |
-| Storage single point of failure | Mode B + Mode C + Layer 0 |
+| Storage single point of failure | Mode A: provider + Layer 0 / Chain Mode: Mode B + Mode C + Layer 0 |
 | Data tampering | Merkle tree + BTC/ETH anchoring |
 | Passphrase brute force | Argon2id (256MB memory-hard) |
 | Memory dump | `zeroize` on all key material |

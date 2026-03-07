@@ -19,7 +19,7 @@ The product is born from a personal need: backing up important Google Drive data
 |  | Google Drive | 1Password | Backblaze | Tarsnap | **zk-vault** |
 |---|---|---|---|---|---|
 | Encryption | Server-side | Client-side | Client-side | Client-side | **Post-quantum client-side** |
-| Storage | Google | AgileBits | Backblaze | Tarsnap | **Distributed (chain + Filecoin)** |
+| Storage | Google | AgileBits | Backblaze | Tarsnap | **User's choice: personal cloud or distributed (chain + Filecoin)** |
 | Proof of data retention | None | None | None | None | **PoSt (Filecoin) + BFT consensus** |
 | Single point of failure | Google | AgileBits | Backblaze | Tarsnap | **None** |
 | Key loss recovery | Password reset | Recovery Kit | Password reset | Unrecoverable | **Guardian Network** |
@@ -36,6 +36,36 @@ As the product evolves, "zk" will also encompass **zero-knowledge proofs** (ZKP)
 ---
 
 ## 2. Architecture Overview
+
+zk-vault supports two deployment models: **Personal Mode** (standalone, no chain required) and **Chain Mode** (networked, full web3 capabilities).
+
+### Personal Mode (Mode A)
+
+```
++---------------------------------------------------------------+
+|                         CLIENT                                 |
+|  Data Sources --> PQ Encryption --> Round-trip Verification    |
+|                                                                |
+|  Layer 0: Local Encrypted Backup (USB / External HDD / NAS)   |
+|           Always present. Independent of all networks.         |
++-------------------------------+-------------------------------+
+                                |
+                                v
+                  +----------------------------+
+                  |   Storage Provider         |
+                  |   (user selects)            |
+                  |                            |
+                  |   S3 / GCS / Azure Blob /  |
+                  |   Backblaze B2 / MinIO /   |
+                  |   any S3-compatible        |
+                  +----------------------------+
+```
+
+No chain, no token, no validators. The client encrypts data locally and pushes to a standard cloud storage provider of the user's choice. Layer 0 is always present as local backup.
+
+This is zk-vault at its simplest — post-quantum encrypted backup with no external dependencies beyond a storage provider.
+
+### Chain Mode (Mode B / Mode C)
 
 ```
 +---------------------------------------------------------------+
@@ -80,11 +110,34 @@ As the product evolves, "zk" will also encompass **zero-knowledge proofs** (ZKP)
 +-------------------+      +--------------------+
 ```
 
+### Why Chain Mode adds value
+
+Personal Mode is fully functional on its own. But by connecting to the zk-vault Chain, users gain capabilities that are impossible to achieve alone:
+
+| Capability | Personal Mode (A) | Chain Mode (B/C) |
+|---|---|---|
+| PQ hybrid encryption | Yes | Yes |
+| Local backup (Layer 0) | Yes | Yes |
+| Cloud storage | User-managed | Chain-managed |
+| Data integrity proof | Local hash chain | BTC/ETH anchoring (immutable) |
+| Storage verification | Trust the provider | BFT consensus / Filecoin PoSt |
+| Redundancy | 1 provider + local | Multi-validator / multi-SP + local |
+| Single point of failure | Provider + local | None |
+| Key recovery | Unrecoverable if lost | Guardian network |
+| Permanent storage | Provider-dependent | Endowment model |
+| Deal lifecycle | Manual renewal | Automated on-chain |
+| Multi-device sync | Manual | Chain state |
+| ZKP verification | N/A | Future: recursive proof aggregation |
+| Composability | N/A | Other dApps can verify backup status |
+
+**The growth path is natural:** Start with Personal Mode for immediate value. Move to Chain Mode when you want stronger guarantees — without re-encrypting or migrating data.
+
 ### Role summary
 
 | Component | Role |
 |---|---|
 | Local (Layer 0) | Safety net — independent of all crypto-economics |
+| Storage Provider (Mode A) | Simple cloud storage for encrypted data |
 | zk-vault Chain | Brain + warehouse + permanent storage layer |
 | Filecoin | External verified warehouse (user's choice) |
 | BTC / ETH | Notary — immutable proof of data integrity |
@@ -275,6 +328,31 @@ The specific BFT implementation (CometBFT, GRANDPA, or other) is to be determine
 
 ## 5. Storage Architecture
 
+### Mode A: Personal Store (No Chain)
+
+The simplest deployment. The client encrypts data locally and pushes to a user-selected cloud storage provider via S3-compatible API.
+
+**Supported providers (any S3-compatible):**
+- AWS S3, Google Cloud Storage, Azure Blob Storage
+- Backblaze B2, Wasabi, MinIO (self-hosted)
+- Any provider supporting the S3 protocol
+
+**What you get:**
+- Post-quantum hybrid encryption (identical to Chain Mode)
+- Round-trip verification and hash chain
+- Layer 0 local backup
+- Simple, familiar cloud storage
+
+**What you don't get:**
+- No BFT consensus or third-party verification
+- No BTC/ETH anchoring
+- No guardian recovery
+- No automated deal lifecycle
+- No multi-device sync via chain state
+- Storage provider is a single point of trust (mitigated by Layer 0)
+
+**Migration to Chain Mode:** Data encrypted in Personal Mode is fully compatible with Chain Mode. Migration means registering existing encrypted files on-chain — no re-encryption required.
+
 ### Mode B: Native Store
 
 Validators directly store encrypted data alongside chain state.
@@ -348,16 +426,19 @@ User pays once
 
 Users select their storage mode per backup:
 
-| | Mode B (Native) | Mode C (Filecoin) |
-|---|---|---|
-| Speed | Fast (direct validator access) | Slower (IPFS gateway retrieval) |
-| Verification | BFT consensus | PoSt (zk-SNARK) |
-| Trust model | Trust validator set | Trust Filecoin protocol |
-| Permanence | Endowment model | Deal renewal |
-| Scalability | Limited by validator count | Virtually unlimited |
-| Best for | Smaller data, fast access | Large data, maximum distribution |
+| | Mode A (Personal) | Mode B (Native) | Mode C (Filecoin) |
+|---|---|---|---|
+| Requires chain | No | Yes | Yes |
+| Speed | Provider-dependent | Fast (direct validator access) | Slower (IPFS gateway retrieval) |
+| Verification | Local hash chain only | BFT consensus | PoSt (zk-SNARK) |
+| Trust model | Trust the provider | Trust validator set | Trust Filecoin protocol |
+| Permanence | Provider-dependent | Endowment model | Deal renewal |
+| Scalability | Virtually unlimited | Limited by validator count | Virtually unlimited |
+| Best for | Personal use, quick start | Smaller data, fast access | Large data, maximum distribution |
 
-Users can also use **both modes simultaneously** for critical data — Mode B for fast access, Mode C for independently verified redundancy.
+In Chain Mode, users can use **both Mode B and Mode C simultaneously** for critical data — Mode B for fast access, Mode C for independently verified redundancy.
+
+Mode A users can migrate to Chain Mode at any time without re-encrypting data.
 
 ---
 
@@ -680,7 +761,7 @@ STATE
 | Hot storage | Storj (S3-compatible) | Mode B (validator storage) | Storj is trust-based. For a backup product, the "hot access" requirement was overweighted — backups are rarely accessed. |
 | Content distribution | IPFS (separate system) | Chain node cache | IPFS was redundant once Filecoin data is accessible via IPFS gateways. Chain nodes can cache for fast retrieval. |
 | Permanent manifests | Arweave (external) | Endowment module (on-chain) | Arweave dependency can be eliminated by implementing the same economic model on the chain itself. |
-| Storage architecture | 4 backends, fixed | 2 modes, user-selectable | Reduced complexity. Each remaining system has a clear, non-overlapping role. |
+| Storage architecture | 4 backends, fixed | 3 modes (A/B/C), user-selectable | Reduced complexity. Mode A for standalone use, Mode B/C for chain-backed guarantees. |
 
 ### Why Rust
 
