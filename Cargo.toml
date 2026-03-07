@@ -37,12 +37,7 @@ zeroize = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# API Server
-axum = { version = "0.8", features = ["ws", "json"] }
-tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace"] }
-jsonwebtoken = "9"
-
-# HTTP client
+# HTTP client (for Filecoin/Storacha, data sources)
 reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 urlencoding = "2"
 base64 = "0.22"
@@ -50,18 +45,9 @@ tokio-util = { version = "0.7", features = ["io"] }
 futures = "0.3"
 async-trait = "0.1"
 
-# Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"] }
-
 # Blockchain anchoring
 bitcoin = { version = "0.32", features = ["serde", "rand-std"] }
 alloy = { version = "1", features = ["providers", "signers", "signer-local", "network", "consensus"] }
-
-# Object storage (S3-compatible for Storj)
-aws-sdk-s3 = "1"
-aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-credential-types = "1"
-aws-types = "1"
 
 # Utilities
 rand = "0.8"

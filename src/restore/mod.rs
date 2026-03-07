@@ -1,16 +1,15 @@
 /// Restore orchestrator for recovering backed-up data.
 ///
 /// The restore pipeline is the inverse of the backup pipeline:
-/// 1. Fetch and decrypt the manifest (from Arweave/IPFS)
+/// 1. Fetch and decrypt the manifest
 /// 2. Verify manifest integrity (Merkle root check)
-/// 3. Download encrypted files from storage backends
+/// 3. Download encrypted files from storage backend
 /// 4. Decrypt each file (hybrid KEM decapsulate → AEAD decrypt)
 /// 5. Verify content hash matches manifest
 /// 6. Output restored plaintext files
 ///
-/// Multi-backend fallback: tries each storage location in order
-/// (Storj → IPFS → Filecoin). If one backend is down, the next
-/// is tried automatically.
+/// Multi-backend fallback: tries each storage location in order.
+/// If one backend is down, the next is tried automatically.
 use tracing::{error, info, warn};
 use x25519_dalek::StaticSecret;
 
@@ -61,11 +60,7 @@ pub struct RestoreConfig {
 impl Default for RestoreConfig {
     fn default() -> Self {
         Self {
-            backend_preference: vec![
-                "storj".to_string(),
-                "ipfs".to_string(),
-                "filecoin".to_string(),
-            ],
+            backend_preference: vec!["filecoin".to_string()],
             streaming_threshold: 64 * 1024 * 1024,
             verify_hashes: true,
         }
@@ -570,7 +565,7 @@ mod tests {
             mime_type: None,
             source_modified_at: None,
             storage_locations: vec![StorageLocation {
-                backend: "storj".to_string(),
+                backend: "filecoin".to_string(),
                 storage_key: "key1".to_string(),
             }],
         });

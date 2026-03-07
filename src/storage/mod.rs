@@ -1,15 +1,10 @@
 /// Pluggable storage backend abstraction for zk-vault.
 ///
 /// Storage backends handle the actual persistence of encrypted data.
-/// The tiered hybrid architecture uses multiple backends:
-/// - Tier 1: Storj (S3-compatible hot storage, fast retrieval)
-/// - Tier 2: Filecoin (cold archive with cryptographic storage proofs)
-/// - Tier 3: IPFS (content-addressed distribution layer)
-/// - Tier 4: Arweave (permanent manifest storage)
-pub mod arweave;
+/// - Mode A: Any S3-compatible provider (personal mode, no chain)
+/// - Mode B: Native validator storage (chain mode)
+/// - Mode C: Filecoin storage deals (chain mode)
 pub mod filecoin;
-pub mod ipfs;
-pub mod storj;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

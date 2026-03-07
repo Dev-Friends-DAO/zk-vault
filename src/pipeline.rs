@@ -47,7 +47,6 @@ pub struct FileBackupResult {
     pub encrypted_size: u64,
     pub content_hash: [u8; 32],
     pub storage_key: String,
-    pub ipfs_cid: Option<String>,
 }
 
 /// Configuration for a pipeline run.
@@ -71,18 +70,15 @@ impl Default for PipelineConfig {
 /// - `source`: The data source to back up from
 /// - `access_token`: Decrypted OAuth access token
 /// - `source_state`: Current sync state (cursor, last sync time)
-/// - `primary_storage`: Primary storage backend (e.g., Storj)
-/// - `secondary_storage`: Optional secondary backend (e.g., IPFS)
+/// - `storage`: Storage backend
 /// - `hybrid_pk`: User's hybrid public key for KEM key wrapping
 /// - `config`: Pipeline configuration
-#[allow(clippy::too_many_arguments)]
 pub async fn run_backup(
     user_id: Uuid,
     source: &dyn DataSource,
     access_token: &str,
     source_state: &SourceState,
-    primary_storage: &dyn StorageBackend,
-    secondary_storage: Option<&dyn StorageBackend>,
+    storage: &dyn StorageBackend,
     hybrid_pk: &kem::HybridPublicKey,
     config: &PipelineConfig,
 ) -> Result<BackupResult> {
@@ -124,8 +120,7 @@ pub async fn run_backup(
             access_token,
             &file_meta.source_id,
             &file_meta.name,
-            primary_storage,
-            secondary_storage,
+            storage,
             hybrid_pk,
             config,
         )
@@ -180,8 +175,7 @@ async fn process_file(
     access_token: &str,
     file_id: &str,
     file_name: &str,
-    primary_storage: &dyn StorageBackend,
-    secondary_storage: Option<&dyn StorageBackend>,
+    storage: &dyn StorageBackend,
     hybrid_pk: &kem::HybridPublicKey,
     config: &PipelineConfig,
 ) -> Result<FileBackupResult> {
@@ -236,26 +230,9 @@ async fn process_file(
     let encrypted_size = bundle.len() as u64;
     let content_hash = hash::hash(&bundle);
 
-    // Upload to primary storage
+    // Upload to storage
     let storage_key = format!("{user_id}/{file_id}");
-    let _primary_result = primary_storage.upload(&storage_key, &bundle).await?;
-
-    // Upload to secondary storage (if available)
-    let ipfs_cid = if let Some(secondary) = secondary_storage {
-        match secondary.upload(&storage_key, &bundle).await {
-            Ok(result) => Some(result.storage_key),
-            Err(e) => {
-                warn!(
-                    file_id = %file_id,
-                    error = %e,
-                    "Secondary storage upload failed, continuing"
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let _upload_result = storage.upload(&storage_key, &bundle).await?;
 
     Ok(FileBackupResult {
         source_file_id: file_id.to_string(),
@@ -264,6 +241,5 @@ async fn process_file(
         encrypted_size,
         content_hash,
         storage_key,
-        ipfs_cid,
     })
 }
