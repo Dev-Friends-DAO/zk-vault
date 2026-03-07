@@ -58,6 +58,8 @@ uuid = { version = "1", features = ["v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "6"
+rpassword = "7"
 
 [dev-dependencies]
 tempfile = "3"
