@@ -847,3 +847,50 @@ The decision to build in Rust has proven valuable:
 | Chain failure | Layer 0 (local backup) is always independent |
 | Filecoin deal expiry | Chain automates renewal; Mode B provides independent redundancy |
 | Token value collapse | Layer 0 survives all economic scenarios |
+
+---
+
+## Appendix: Resource and Environmental Impact
+
+zk-vault is designed to minimize its footprint on external systems and the environment. This section documents the real costs honestly.
+
+### Blockchain impact
+
+| Resource | Impact | Mitigation |
+|---|---|---|
+| Bitcoin block space | OP_RETURN: 32 bytes per anchor tx | Super Merkle Tree batches all users into 1 tx per period. Impact is negligible compared to Ordinals/BRC-20 traffic. |
+| Ethereum block space | Calldata: 32 bytes per anchor tx | Same batching. One tx regardless of user count. |
+| Filecoin (Mode C) | Storage deals + PoSt verification | This is Filecoin's intended use. zk-vault is a consumer, not a burden. |
+
+### Energy and compute
+
+| Resource | Impact | Mitigation |
+|---|---|---|
+| Mode B validators | Node operation requires electricity and hardware | PoA/DPoS — no Proof-of-Work mining. Validator energy is comparable to running a standard server. |
+| Mode A storage providers | Utilizes existing cloud data center infrastructure | No additional infrastructure created. Piggybacks on AWS/GCS/Azure economies of scale. |
+| Argon2id KDF | 256MB memory + CPU per key derivation | Intentional cost (brute-force resistance). Runs once per session on the user's device. |
+| ZKP generation (future) | STARK proof generation is compute-intensive | Runs client-side. No externalized compute cost. |
+
+### Storage overhead
+
+| Resource | Impact | Mitigation |
+|---|---|---|
+| Per-file encryption overhead | ~1.2 KB per file (KEM ciphertext + ephemeral key + nonce + wrapped key) | Negligible for files > 1 KB. For very small files, batching can amortize the overhead. |
+| Mode B full replication (Phase 1) | All validators store all data (e.g., 5 nodes x 500GB = 2.5TB total) | Transitional. Phases into erasure coding (Phase 2) and sharding (Phase 3), reducing per-validator load. |
+| Mode C redundancy | 4-6 Filecoin SPs per file | Intentional redundancy for data durability. Storage cost is paid by the user. |
+
+### Economic costs to users
+
+| Resource | Impact | Notes |
+|---|---|---|
+| BTC/ETH anchoring fees | ~$0.50/user/anchor with 1 user; ~$0.0005 with 1,000 users | Cost decreases as user base grows due to Super Merkle Tree batching. |
+| Filecoin deal fees | Market-rate storage deals, renewed every 180-540 days | Endowment model (Mode B) eliminates recurring fees via one-time payment. |
+| Mode A cloud storage | Standard cloud storage pricing (S3, GCS, etc.) | User chooses provider and pricing tier. |
+
+### What zk-vault does NOT do
+
+- **No Proof-of-Work mining** — PoA/DPoS consensus has no mining energy cost
+- **No blockchain bloat** — only 32-byte Merkle roots are anchored, not data
+- **No spam transactions** — batching ensures minimal on-chain footprint
+- **No new infrastructure required** — Mode A runs on existing cloud providers; Mode B validators are standard servers
+- **No external data exposure** — all data is encrypted client-side before any network interaction

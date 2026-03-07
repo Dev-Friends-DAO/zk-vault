@@ -202,6 +202,22 @@ All users' roots are batched into a single Super Merkle Tree, so one transaction
 | Passphrase loss | Guardian recovery network |
 | Chain failure | Layer 0 is always independent |
 
+## Resource Impact
+
+zk-vault is designed to minimize its external footprint.
+
+| Resource | Impact | Mitigation |
+|---|---|---|
+| Bitcoin/Ethereum block space | 32 bytes per anchor tx | All users batched into 1 tx via Super Merkle Tree |
+| Validator energy (Mode B) | PoA/DPoS node operation | No PoW mining — comparable to a standard server |
+| Cloud storage (Mode A) | Standard provider usage | No new infrastructure; uses existing cloud providers |
+| Per-file encryption overhead | ~1.2 KB per file | Negligible for typical file sizes |
+| Argon2id KDF | 256MB memory per key derivation | Intentional cost for brute-force resistance; runs once per session |
+
+**No PoW mining. No blockchain bloat (32-byte roots only). No spam transactions (batched). No plaintext data ever leaves the client.**
+
+See [docs/PRODUCT.md](docs/PRODUCT.md) for the full impact analysis.
+
 ## Tech Stack
 
 | Component | Technology |
