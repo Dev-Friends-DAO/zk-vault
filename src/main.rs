@@ -22,11 +22,14 @@ struct Cli {
 enum Commands {
     /// Initialize a new vault (generate keys)
     Init,
-    /// Back up files to S3-compatible storage
+    /// Back up files to S3-compatible storage and/or local directory
     Backup {
         /// Files or directories to back up
         #[arg(required = true)]
         paths: Vec<PathBuf>,
+        /// Save encrypted backups to a local directory (Layer 0)
+        #[arg(long)]
+        local: Option<PathBuf>,
     },
     /// Restore from backup
     Restore,
@@ -49,7 +52,7 @@ async fn main() {
 
     match cli.command {
         Commands::Init => cmd_init(),
-        Commands::Backup { paths } => cmd_backup(paths).await,
+        Commands::Backup { paths, local } => cmd_backup(paths, local).await,
         Commands::Restore => {
             println!("zk-vault restore: not yet implemented");
         }
@@ -225,14 +228,25 @@ fn save_manifest(manifest: &zk_vault::manifest::BackupManifest) -> std::io::Resu
     Ok(path)
 }
 
-async fn cmd_backup(paths: Vec<PathBuf>) {
-    // 1. Load keystore
+async fn cmd_backup(paths: Vec<PathBuf>, local_dir: Option<PathBuf>) {
+    // 1. Determine storage targets
+    let config_path = keys::vault_dir().join("config.toml");
+    let use_s3 = config_path.exists();
+    let use_local = local_dir.is_some();
+
+    if !use_s3 && !use_local {
+        eprintln!("Error: No storage target specified.");
+        eprintln!("Either create ~/.zk-vault/config.toml for S3, or use --local <dir>.");
+        std::process::exit(1);
+    }
+
+    // 2. Load keystore
     let store = keys::load_key_store().unwrap_or_else(|e| {
         eprintln!("Error: Cannot load vault. Run `zk-vault init` first. ({e})");
         std::process::exit(1);
     });
 
-    // 2. Unlock keys
+    // 3. Unlock keys
     let passphrase =
         rpassword::prompt_password("Enter passphrase: ").expect("Failed to read passphrase");
 
@@ -241,7 +255,6 @@ async fn cmd_backup(paths: Vec<PathBuf>) {
         std::process::exit(1);
     });
 
-    // 3. Build hybrid public key for KEM wrapping
     let hybrid_pk = kem::HybridPublicKey {
         kem_pk: unlocked.kem_pk.clone(),
         x25519_pk: unlocked.x25519_pk,
@@ -255,18 +268,41 @@ async fn cmd_backup(paths: Vec<PathBuf>) {
     }
     println!("Found {} file(s) to back up.", files.len());
 
-    // 5. Connect to S3
-    let s3_config = load_s3_config();
-    let storage = S3Backend::new(&s3_config).unwrap_or_else(|e| {
-        eprintln!("Error: Failed to connect to S3: {e}");
-        std::process::exit(1);
-    });
+    // 5. Set up storage targets
+    let s3_storage = if use_s3 {
+        let s3_config = load_s3_config();
+        Some(S3Backend::new(&s3_config).unwrap_or_else(|e| {
+            eprintln!("Error: Failed to connect to S3: {e}");
+            std::process::exit(1);
+        }))
+    } else {
+        None
+    };
+
+    if let Some(dir) = &local_dir {
+        std::fs::create_dir_all(dir).unwrap_or_else(|e| {
+            eprintln!(
+                "Error: Cannot create local output dir {}: {e}",
+                dir.display()
+            );
+            std::process::exit(1);
+        });
+    }
+
+    let mut targets: Vec<&str> = Vec::new();
+    if use_s3 {
+        targets.push("S3");
+    }
+    if use_local {
+        targets.push("local");
+    }
+    println!("Storage targets: {}", targets.join(" + "));
 
     // 6. Process each file
     let user_id = Uuid::now_v7();
     let mut manifest_builder = ManifestBuilder::new(user_id, "local");
     let mut leaf_hashes: Vec<[u8; 32]> = Vec::new();
-    let mut total_uploaded: u64 = 0;
+    let mut total_bytes: u64 = 0;
     let mut success_count: usize = 0;
 
     for file_path in &files {
@@ -312,35 +348,66 @@ async fn cmd_backup(paths: Vec<PathBuf>) {
         let bundle_bytes = encrypted_bundle.to_bytes();
         let encrypted_size = bundle_bytes.len() as u64;
         let content_hash = hash::hash(&bundle_bytes);
-
-        // Upload to S3
         let storage_key = format!("{user_id}/{file_id}");
-        match storage.upload(&storage_key, &bundle_bytes).await {
-            Ok(_) => {
-                println!(
-                    "  Backed up: {relative_path} ({original_size} -> {encrypted_size} bytes)"
-                );
-                leaf_hashes.push(content_hash);
-                total_uploaded += encrypted_size;
-                success_count += 1;
 
-                manifest_builder.add_file(ManifestFileEntry {
-                    source_path: relative_path,
-                    source_id: file_id,
-                    content_hash: plaintext_hash,
-                    original_size,
-                    encrypted_size,
-                    mime_type: None,
-                    source_modified_at: None,
-                    storage_locations: vec![StorageLocation {
+        // Store to targets
+        let mut locations: Vec<StorageLocation> = Vec::new();
+        let mut file_ok = true;
+
+        // Local storage
+        if let Some(dir) = &local_dir {
+            let local_file_dir = dir.join(user_id.to_string());
+            if let Err(e) = std::fs::create_dir_all(&local_file_dir) {
+                eprintln!("  Local write failed for {relative_path}: {e}");
+                file_ok = false;
+            } else {
+                let local_path = local_file_dir.join(&file_id);
+                if let Err(e) = std::fs::write(&local_path, &bundle_bytes) {
+                    eprintln!("  Local write failed for {relative_path}: {e}");
+                    file_ok = false;
+                } else {
+                    locations.push(StorageLocation {
+                        backend: "local".to_string(),
+                        storage_key: local_path.to_string_lossy().to_string(),
+                    });
+                }
+            }
+        }
+
+        // S3 storage
+        if let Some(s3) = &s3_storage {
+            match s3.upload(&storage_key, &bundle_bytes).await {
+                Ok(_) => {
+                    locations.push(StorageLocation {
                         backend: "s3".to_string(),
-                        storage_key,
-                    }],
-                });
+                        storage_key: storage_key.clone(),
+                    });
+                }
+                Err(e) => {
+                    eprintln!("  S3 upload failed for {relative_path}: {e}");
+                    if locations.is_empty() {
+                        file_ok = false;
+                    }
+                }
             }
-            Err(e) => {
-                eprintln!("  Upload failed for {relative_path}: {e}");
-            }
+        }
+
+        if file_ok && !locations.is_empty() {
+            println!("  Backed up: {relative_path} ({original_size} -> {encrypted_size} bytes)");
+            leaf_hashes.push(content_hash);
+            total_bytes += encrypted_size;
+            success_count += 1;
+
+            manifest_builder.add_file(ManifestFileEntry {
+                source_path: relative_path,
+                source_id: file_id,
+                content_hash: plaintext_hash,
+                original_size,
+                encrypted_size,
+                mime_type: None,
+                source_modified_at: None,
+                storage_locations: locations,
+            });
         }
     }
 
@@ -365,7 +432,7 @@ async fn cmd_backup(paths: Vec<PathBuf>) {
             println!();
             println!("Backup complete.");
             println!("  Files:       {success_count}/{}", files.len());
-            println!("  Uploaded:    {total_uploaded} bytes");
+            println!("  Total:       {total_bytes} bytes (encrypted)");
             println!("  Merkle root: {}", hex::encode(merkle_root));
             println!("  Manifest:    {}", path.display());
             println!("  Backup ID:   {}", manifest.backup_id);
