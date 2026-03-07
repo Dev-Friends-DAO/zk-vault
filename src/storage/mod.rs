@@ -5,6 +5,7 @@
 /// - Mode B: Native validator storage (chain mode)
 /// - Mode C: Filecoin storage deals (chain mode)
 pub mod filecoin;
+pub mod s3;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
