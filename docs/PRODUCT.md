@@ -710,18 +710,56 @@ If the user loses their passphrase, all data is permanently lost. This is the mo
 
 ### Authentication
 
-The current implementation plans OPAQUE (RFC 9497) for password-based authentication. With the move to a dApp chain, authentication approaches to be evaluated include:
+Authentication in zk-vault serves two distinct purposes:
 
-- **Account Abstraction (ERC-4337 / chain-native):** Flexible account models, social recovery built in, gas abstraction
-- **Wallet-based authentication:** Direct signing with user's wallet
-- **Web3 auth protocols:** Various emerging standards for decentralized authentication
-- **Hybrid approaches:** Passphrase-based encryption key + wallet-based chain authentication
+1. **Vault unlock** — Derive the PDK to decrypt secret keys (encryption layer)
+2. **Chain interaction** — Authorize transactions on-chain (identity layer)
 
-The authentication layer must satisfy two distinct needs:
-1. Chain interaction authentication (who can submit transactions)
-2. Encryption key derivation (how to derive the master key that encrypts data)
+These are deliberately separated. Compromising one does not compromise the other.
 
-These may use different mechanisms.
+#### Authentication Modules (User-Selectable)
+
+| Method | Mode A | Mode B/C | Description |
+|---|---|---|---|
+| **Passphrase** | Default | Available | User-chosen passphrase → Argon2id → PDK |
+| **Passkey / Biometrics** | Available | Available | FIDO2/WebAuthn via device Secure Enclave (Face ID, fingerprint, hardware key). No chain required — runs locally on device. |
+| **Session Key** | — | Available | Time-limited key with restricted permissions (e.g., backup-only, 24h expiry). Avoids repeated passphrase entry. |
+| **Social Recovery** | — | Available | Guardian-based account recovery (see Section 8). |
+| **External Wallet** | — | Available | Existing wallet (e.g., MetaMask) for chain authentication. |
+
+Users choose their preferred method(s). Multiple methods can be active simultaneously (e.g., Passkey for daily use + passphrase as fallback + Guardian Recovery for emergencies).
+
+#### Account Abstraction (Chain-Native)
+
+In Chain Mode, accounts use native Account Abstraction — not bolted on via ERC-4337, but designed into the chain's account model from the start.
+
+```
+Account {
+    auth: AuthModule,          // Pluggable: passphrase / passkey / multi-sig / social recovery
+    encryption: KeyStore,      // ML-KEM + X25519 secret keys (encrypted by PDK)
+    permissions: Vec<SessionKey>,  // Scoped, time-limited access grants
+}
+```
+
+AA enables:
+- **Pluggable signature verification** — ML-DSA-65, Passkey (P-256), or any scheme
+- **Session Keys** — Scoped permissions without full key access
+- **Social Recovery** — Guardians rotate auth keys without touching encryption keys
+- **Gas abstraction** — Meta-transactions for UX simplicity
+
+#### Design Principle
+
+Authentication and encryption keys are independent layers:
+
+```
+Authentication (who you are)     Encryption (protecting data)
+  Passkey / Wallet / etc.          Passphrase → Argon2id → PDK
+         |                                  |
+         v                                  v
+  Chain transactions              Decrypt secret keys
+```
+
+A compromised wallet cannot decrypt backups. A leaked passphrase cannot submit chain transactions (in Mode B/C with wallet auth). Defense in depth.
 
 ### Composability
 
