@@ -31,8 +31,15 @@ enum Commands {
         #[arg(long)]
         local: Option<PathBuf>,
     },
-    /// Restore from backup
-    Restore,
+    /// Restore files from a backup
+    Restore {
+        /// Backup ID or path to manifest file
+        #[arg()]
+        backup: String,
+        /// Output directory for restored files
+        #[arg(short, long, default_value = ".")]
+        output: PathBuf,
+    },
     /// Verify backup integrity
     Verify,
     /// Show vault status
@@ -53,9 +60,7 @@ async fn main() {
     match cli.command {
         Commands::Init => cmd_init(),
         Commands::Backup { paths, local } => cmd_backup(paths, local).await,
-        Commands::Restore => {
-            println!("zk-vault restore: not yet implemented");
-        }
+        Commands::Restore { backup, output } => cmd_restore(backup, output).await,
         Commands::Verify => {
             println!("zk-vault verify: not yet implemented");
         }
@@ -442,4 +447,242 @@ async fn cmd_backup(paths: Vec<PathBuf>, local_dir: Option<PathBuf>) {
             eprintln!("Merkle root: {}", hex::encode(merkle_root));
         }
     }
+}
+
+/// Resolve a backup identifier to a manifest path.
+/// Accepts either a direct file path or a backup UUID (looked up in ~/.zk-vault/manifests/).
+fn resolve_manifest_path(backup: &str) -> PathBuf {
+    let path = PathBuf::from(backup);
+    if path.exists() {
+        return path;
+    }
+
+    // Try as backup ID in manifests dir
+    let manifest_path = keys::vault_dir()
+        .join("manifests")
+        .join(format!("{backup}.json"));
+    if manifest_path.exists() {
+        return manifest_path;
+    }
+
+    eprintln!("Error: Cannot find manifest for '{backup}'.");
+    eprintln!("Provide a backup ID or path to a manifest file.");
+    eprintln!(
+        "Available manifests: {}",
+        keys::vault_dir().join("manifests").display()
+    );
+    std::process::exit(1);
+}
+
+/// Read an encrypted bundle from a local file path.
+fn read_local_bundle(path: &str) -> Option<Vec<u8>> {
+    let p = PathBuf::from(path);
+    if p.exists() {
+        std::fs::read(&p).ok()
+    } else {
+        None
+    }
+}
+
+async fn cmd_restore(backup: String, output: PathBuf) {
+    // 1. Load manifest
+    let manifest_path = resolve_manifest_path(&backup);
+    let manifest_json = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
+        eprintln!("Error reading manifest: {e}");
+        std::process::exit(1);
+    });
+    let manifest: zk_vault::manifest::BackupManifest = serde_json::from_str(&manifest_json)
+        .unwrap_or_else(|e| {
+            eprintln!("Error parsing manifest: {e}");
+            std::process::exit(1);
+        });
+
+    println!("Restoring backup: {}", manifest.backup_id);
+    println!("  Source:  {}", manifest.source);
+    println!("  Files:   {}", manifest.file_count);
+    println!("  Created: {}", manifest.created_at);
+
+    // 2. Verify manifest integrity
+    match manifest.verify_integrity() {
+        Ok(true) => println!("  Merkle root: verified"),
+        Ok(false) => {
+            eprintln!("Error: Manifest Merkle root mismatch. Data may be tampered.");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error verifying manifest: {e}");
+            std::process::exit(1);
+        }
+    }
+
+    // 3. Unlock keys
+    let store = keys::load_key_store().unwrap_or_else(|e| {
+        eprintln!("Error: Cannot load vault. ({e})");
+        std::process::exit(1);
+    });
+
+    let passphrase =
+        rpassword::prompt_password("Enter passphrase: ").expect("Failed to read passphrase");
+
+    let unlocked = keys::unlock_all_keys(passphrase.as_bytes(), &store).unwrap_or_else(|e| {
+        eprintln!("Error: Failed to unlock vault. Wrong passphrase? ({e})");
+        std::process::exit(1);
+    });
+
+    // 4. Set up S3 if available
+    let config_path = keys::vault_dir().join("config.toml");
+    let s3_storage = if config_path.exists() {
+        let s3_config = load_s3_config();
+        S3Backend::new(&s3_config).ok()
+    } else {
+        None
+    };
+
+    // 5. Create output directory
+    std::fs::create_dir_all(&output).unwrap_or_else(|e| {
+        eprintln!("Error creating output directory: {e}");
+        std::process::exit(1);
+    });
+
+    // 6. Restore each file
+    let mut restored = 0usize;
+    let mut failed = 0usize;
+    let mut bytes_restored: u64 = 0;
+
+    for file_entry in &manifest.files {
+        let source_path = &file_entry.source_path;
+
+        // Try to download the encrypted bundle
+        let bundle_bytes = fetch_bundle(file_entry, &s3_storage).await;
+        let bundle_bytes = match bundle_bytes {
+            Some(data) => data,
+            None => {
+                eprintln!("  Failed: {source_path} (not found in any storage)");
+                failed += 1;
+                continue;
+            }
+        };
+
+        // Parse encrypted bundle
+        let encrypted_bundle = match bundle::EncryptedBundle::from_bytes(&bundle_bytes) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("  Failed: {source_path} (invalid bundle: {e})");
+                failed += 1;
+                continue;
+            }
+        };
+
+        // Decapsulate: recover per-file symmetric key
+        let x25519_sk_bytes: [u8; 32] =
+            unlocked.x25519_sk.clone().try_into().unwrap_or_else(|_| {
+                eprintln!("Error: Invalid X25519 secret key length");
+                std::process::exit(1);
+            });
+        let x25519_sk = x25519_dalek::StaticSecret::from(x25519_sk_bytes);
+        let sym_key = match kem::decapsulate(
+            &unlocked.kem_sk,
+            &x25519_sk,
+            &encrypted_bundle.kem_ciphertext,
+            &encrypted_bundle.eph_x25519_pk,
+            &encrypted_bundle.wrapped_key,
+        ) {
+            Ok(key) => key,
+            Err(e) => {
+                eprintln!("  Failed: {source_path} (decapsulate error: {e})");
+                failed += 1;
+                continue;
+            }
+        };
+
+        // Decrypt file content
+        let aad_str = format!(
+            "zk-vault:file:{}:{}",
+            manifest.user_id, file_entry.source_id
+        );
+        let plaintext = match aead::decrypt(
+            &sym_key,
+            &encrypted_bundle.nonce,
+            &encrypted_bundle.ciphertext,
+            aad_str.as_bytes(),
+        ) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("  Failed: {source_path} (decrypt error: {e})");
+                failed += 1;
+                continue;
+            }
+        };
+
+        // Verify content hash
+        let computed_hash = hash::hash(&plaintext);
+        if computed_hash != file_entry.content_hash {
+            eprintln!("  Failed: {source_path} (content hash mismatch — data corrupted)");
+            failed += 1;
+            continue;
+        }
+
+        // Write restored file
+        let out_path = output.join(
+            PathBuf::from(source_path)
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new(&file_entry.source_id)),
+        );
+        if let Some(parent) = out_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        match std::fs::write(&out_path, &plaintext) {
+            Ok(()) => {
+                println!(
+                    "  Restored: {source_path} ({} bytes) -> {}",
+                    plaintext.len(),
+                    out_path.display()
+                );
+                restored += 1;
+                bytes_restored += plaintext.len() as u64;
+            }
+            Err(e) => {
+                eprintln!("  Failed: {source_path} (write error: {e})");
+                failed += 1;
+            }
+        }
+    }
+
+    println!();
+    println!("Restore complete.");
+    println!("  Restored: {restored}/{}", manifest.file_count);
+    println!("  Failed:   {failed}");
+    println!("  Bytes:    {bytes_restored}");
+    println!("  Output:   {}", output.display());
+}
+
+/// Fetch an encrypted bundle from available storage locations.
+async fn fetch_bundle(
+    file_entry: &zk_vault::manifest::ManifestFileEntry,
+    s3_storage: &Option<S3Backend>,
+) -> Option<Vec<u8>> {
+    for location in &file_entry.storage_locations {
+        match location.backend.as_str() {
+            "local" => {
+                if let Some(data) = read_local_bundle(&location.storage_key) {
+                    return Some(data);
+                }
+            }
+            "s3" => {
+                if let Some(s3) = s3_storage {
+                    if let Ok(data) = s3.download(&location.storage_key).await {
+                        return Some(data);
+                    }
+                }
+            }
+            other => {
+                eprintln!(
+                    "  Warning: Unknown backend '{other}' for {}",
+                    file_entry.source_path
+                );
+            }
+        }
+    }
+    None
 }
