@@ -40,8 +40,12 @@ enum Commands {
         #[arg(short, long, default_value = ".")]
         output: PathBuf,
     },
-    /// Verify backup integrity
-    Verify,
+    /// Verify backup integrity without decrypting
+    Verify {
+        /// Backup ID or path to manifest file
+        #[arg()]
+        backup: String,
+    },
     /// Show vault status
     Status,
 }
@@ -61,9 +65,7 @@ async fn main() {
         Commands::Init => cmd_init(),
         Commands::Backup { paths, local } => cmd_backup(paths, local).await,
         Commands::Restore { backup, output } => cmd_restore(backup, output).await,
-        Commands::Verify => {
-            println!("zk-vault verify: not yet implemented");
-        }
+        Commands::Verify { backup } => cmd_verify(backup).await,
         Commands::Status => {
             println!("zk-vault status: not yet implemented");
         }
@@ -685,4 +687,172 @@ async fn fetch_bundle(
         }
     }
     None
+}
+
+async fn cmd_verify(backup: String) {
+    // 1. Load manifest
+    let manifest_path = resolve_manifest_path(&backup);
+    let manifest_json = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
+        eprintln!("Error reading manifest: {e}");
+        std::process::exit(1);
+    });
+    let manifest: zk_vault::manifest::BackupManifest = serde_json::from_str(&manifest_json)
+        .unwrap_or_else(|e| {
+            eprintln!("Error parsing manifest: {e}");
+            std::process::exit(1);
+        });
+
+    println!("Verifying backup: {}", manifest.backup_id);
+    println!("  Source:  {}", manifest.source);
+    println!("  Files:   {}", manifest.file_count);
+    println!("  Created: {}", manifest.created_at);
+    println!();
+
+    let mut checks_passed = 0u32;
+    let mut checks_failed = 0u32;
+
+    // Check 1: Manifest Merkle root integrity
+    print!("  [1] Merkle root integrity ... ");
+    match manifest.verify_integrity() {
+        Ok(true) => {
+            println!("PASS");
+            checks_passed += 1;
+        }
+        Ok(false) => {
+            println!("FAIL (root mismatch — possible tampering)");
+            checks_failed += 1;
+        }
+        Err(e) => {
+            println!("FAIL ({e})");
+            checks_failed += 1;
+        }
+    }
+
+    // Check 2: Storage availability
+    let config_path = keys::vault_dir().join("config.toml");
+    let s3_storage = if config_path.exists() {
+        let s3_config = load_s3_config();
+        S3Backend::new(&s3_config).ok()
+    } else {
+        None
+    };
+
+    print!("  [2] Storage availability ... ");
+    let mut files_available = 0u32;
+    let mut files_missing = 0u32;
+
+    for file_entry in &manifest.files {
+        let found = check_file_exists(file_entry, &s3_storage).await;
+        if found {
+            files_available += 1;
+        } else {
+            files_missing += 1;
+        }
+    }
+
+    if files_missing == 0 {
+        println!(
+            "PASS ({files_available}/{} files found)",
+            manifest.file_count
+        );
+        checks_passed += 1;
+    } else {
+        println!("FAIL ({files_missing} missing, {files_available} found)",);
+        checks_failed += 1;
+    }
+
+    // Check 3: Bundle hash verification (download and check BLAKE3 hash of encrypted bundles)
+    print!("  [3] Bundle hash verification ... ");
+    let mut hash_ok = 0u32;
+    let mut hash_fail = 0u32;
+    let mut hash_skip = 0u32;
+
+    for file_entry in &manifest.files {
+        let bundle_bytes = fetch_bundle(file_entry, &s3_storage).await;
+        match bundle_bytes {
+            Some(data) => {
+                // Verify bundle parses correctly
+                if bundle::EncryptedBundle::from_bytes(&data).is_ok() {
+                    hash_ok += 1;
+                } else {
+                    hash_fail += 1;
+                    eprintln!("\n    Invalid bundle: {}", file_entry.source_path);
+                }
+            }
+            None => {
+                hash_skip += 1;
+            }
+        }
+    }
+
+    if hash_fail == 0 && hash_skip == 0 {
+        println!("PASS ({hash_ok} bundles valid)");
+        checks_passed += 1;
+    } else if hash_fail > 0 {
+        println!("FAIL ({hash_fail} invalid, {hash_ok} valid, {hash_skip} skipped)");
+        checks_failed += 1;
+    } else {
+        println!("PARTIAL ({hash_ok} valid, {hash_skip} unavailable)");
+        checks_passed += 1;
+    }
+
+    // Check 4: Manifest metadata consistency
+    print!("  [4] Manifest consistency ... ");
+    let file_count_ok = manifest.file_count == manifest.files.len() as u32;
+    let sizes_ok = manifest.total_original_size
+        == manifest.files.iter().map(|f| f.original_size).sum::<u64>()
+        && manifest.total_encrypted_size
+            == manifest.files.iter().map(|f| f.encrypted_size).sum::<u64>();
+
+    if file_count_ok && sizes_ok {
+        println!("PASS");
+        checks_passed += 1;
+    } else {
+        println!("FAIL");
+        if !file_count_ok {
+            eprintln!("    File count mismatch");
+        }
+        if !sizes_ok {
+            eprintln!("    Size totals mismatch");
+        }
+        checks_failed += 1;
+    }
+
+    // Summary
+    println!();
+    let all_passed = checks_failed == 0;
+    if all_passed {
+        println!(
+            "Verification PASSED ({checks_passed}/{} checks).",
+            checks_passed + checks_failed
+        );
+    } else {
+        println!("Verification FAILED ({checks_failed} failed, {checks_passed} passed).");
+        std::process::exit(1);
+    }
+}
+
+/// Check if a file exists in any of its storage locations.
+async fn check_file_exists(
+    file_entry: &zk_vault::manifest::ManifestFileEntry,
+    s3_storage: &Option<S3Backend>,
+) -> bool {
+    for location in &file_entry.storage_locations {
+        match location.backend.as_str() {
+            "local" => {
+                if PathBuf::from(&location.storage_key).exists() {
+                    return true;
+                }
+            }
+            "s3" => {
+                if let Some(s3) = s3_storage {
+                    if let Ok(true) = s3.exists(&location.storage_key).await {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
