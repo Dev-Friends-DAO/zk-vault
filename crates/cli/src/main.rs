@@ -3,11 +3,11 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use uuid::Uuid;
 
-use zk_vault::crypto::{aead, bundle, hash, kem, keys};
-use zk_vault::manifest::{ManifestBuilder, ManifestFileEntry, StorageLocation};
-use zk_vault::merkle::tree::MerkleTree;
-use zk_vault::storage::s3::{S3Backend, S3Config};
-use zk_vault::storage::StorageBackend;
+use zk_vault_core::crypto::{aead, bundle, hash, kem, keys};
+use zk_vault_core::manifest::{ManifestBuilder, ManifestFileEntry, StorageLocation};
+use zk_vault_core::merkle::tree::MerkleTree;
+use zk_vault_core::storage::s3::{S3Backend, S3Config};
+use zk_vault_core::storage::StorageBackend;
 
 #[derive(Parser)]
 #[command(name = "zk-vault")]
@@ -222,7 +222,7 @@ fn collect_dir_recursive(dir: &PathBuf, files: &mut Vec<PathBuf>) {
 }
 
 /// Save a manifest to ~/.zk-vault/manifests/.
-fn save_manifest(manifest: &zk_vault::manifest::BackupManifest) -> std::io::Result<PathBuf> {
+fn save_manifest(manifest: &zk_vault_core::manifest::BackupManifest) -> std::io::Result<PathBuf> {
     let dir = keys::vault_dir().join("manifests");
     std::fs::create_dir_all(&dir)?;
     let filename = format!("{}.json", manifest.backup_id);
@@ -491,7 +491,7 @@ async fn cmd_restore(backup: String, output: PathBuf) {
         eprintln!("Error reading manifest: {e}");
         std::process::exit(1);
     });
-    let manifest: zk_vault::manifest::BackupManifest = serde_json::from_str(&manifest_json)
+    let manifest: zk_vault_core::manifest::BackupManifest = serde_json::from_str(&manifest_json)
         .unwrap_or_else(|e| {
             eprintln!("Error parsing manifest: {e}");
             std::process::exit(1);
@@ -579,7 +579,7 @@ async fn cmd_restore(backup: String, output: PathBuf) {
                 eprintln!("Error: Invalid X25519 secret key length");
                 std::process::exit(1);
             });
-        let x25519_sk = x25519_dalek::StaticSecret::from(x25519_sk_bytes);
+        let x25519_sk = kem::StaticSecret::from(x25519_sk_bytes);
         let sym_key = match kem::decapsulate(
             &unlocked.kem_sk,
             &x25519_sk,
@@ -659,7 +659,7 @@ async fn cmd_restore(backup: String, output: PathBuf) {
 
 /// Fetch an encrypted bundle from available storage locations.
 async fn fetch_bundle(
-    file_entry: &zk_vault::manifest::ManifestFileEntry,
+    file_entry: &zk_vault_core::manifest::ManifestFileEntry,
     s3_storage: &Option<S3Backend>,
 ) -> Option<Vec<u8>> {
     for location in &file_entry.storage_locations {
@@ -694,7 +694,7 @@ async fn cmd_verify(backup: String) {
         eprintln!("Error reading manifest: {e}");
         std::process::exit(1);
     });
-    let manifest: zk_vault::manifest::BackupManifest = serde_json::from_str(&manifest_json)
+    let manifest: zk_vault_core::manifest::BackupManifest = serde_json::from_str(&manifest_json)
         .unwrap_or_else(|e| {
             eprintln!("Error parsing manifest: {e}");
             std::process::exit(1);
@@ -832,7 +832,7 @@ async fn cmd_verify(backup: String) {
 
 /// Check if a file exists in any of its storage locations.
 async fn check_file_exists(
-    file_entry: &zk_vault::manifest::ManifestFileEntry,
+    file_entry: &zk_vault_core::manifest::ManifestFileEntry,
     s3_storage: &Option<S3Backend>,
 ) -> bool {
     for location in &file_entry.storage_locations {
@@ -942,7 +942,8 @@ fn cmd_status() {
             let show_count = manifests.len().min(5);
             for entry in manifests.iter().take(show_count) {
                 if let Ok(json) = std::fs::read_to_string(entry.path()) {
-                    if let Ok(m) = serde_json::from_str::<zk_vault::manifest::BackupManifest>(&json)
+                    if let Ok(m) =
+                        serde_json::from_str::<zk_vault_core::manifest::BackupManifest>(&json)
                     {
                         println!(
                             "  {} | {} | {} files | {}",

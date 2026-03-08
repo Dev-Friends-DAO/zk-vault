@@ -1,0 +1,30 @@
+[package]
+name = "zk-vault-cli"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "AGPL-3.0-or-later"
+description = "CLI for zk-vault: post-quantum secure backup"
+
+[[bin]]
+name = "zk-vault"
+path = "src/main.rs"
+
+[dependencies]
+zk-vault-core = { path = "../core" }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+rpassword = "7"
+toml = "0.8"
+
+# These are re-used from core but needed directly in main.rs
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+anyhow = "1"

@@ -11,7 +11,8 @@ use pqcrypto_traits::kem::{
     Ciphertext as _, PublicKey as PqPublicKey, SecretKey as PqSecretKey, SharedSecret as _,
 };
 use rand::rngs::OsRng;
-use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey, StaticSecret};
+pub use x25519_dalek::StaticSecret;
+use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 use zeroize::Zeroize;
 
 use crate::crypto::aead;
