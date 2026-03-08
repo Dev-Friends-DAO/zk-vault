@@ -66,9 +66,7 @@ async fn main() {
         Commands::Backup { paths, local } => cmd_backup(paths, local).await,
         Commands::Restore { backup, output } => cmd_restore(backup, output).await,
         Commands::Verify { backup } => cmd_verify(backup).await,
-        Commands::Status => {
-            println!("zk-vault status: not yet implemented");
-        }
+        Commands::Status => cmd_status(),
     }
 }
 
@@ -855,4 +853,139 @@ async fn check_file_exists(
         }
     }
     false
+}
+
+fn cmd_status() {
+    println!("zk-vault status");
+    println!("===============");
+
+    // 1. Vault existence
+    let vault_dir = keys::vault_dir();
+    let keystore_path = keys::keystore_path();
+
+    if !keystore_path.exists() {
+        println!();
+        println!("Vault: NOT INITIALIZED");
+        println!("  Run `zk-vault init` to create a new vault.");
+        return;
+    }
+
+    println!();
+    println!("Vault: {}", vault_dir.display());
+
+    // 2. Load keystore and show public key fingerprints
+    match keys::load_key_store() {
+        Ok(store) => {
+            println!("  Version:  {}", store.version);
+
+            // Show fingerprints (first 8 bytes of BLAKE3 hash of public key)
+            let kem_pk_bytes = hex::decode(&store.kem_pk).unwrap_or_default();
+            let x25519_pk_bytes = hex::decode(&store.x25519_pk).unwrap_or_default();
+            let mldsa_pk_bytes = hex::decode(&store.mldsa_pk).unwrap_or_default();
+            let ed25519_pk_bytes = hex::decode(&store.ed25519_pk).unwrap_or_default();
+
+            println!();
+            println!("Public keys:");
+            println!("  ML-KEM-768:  {}", fingerprint(&kem_pk_bytes));
+            println!("  X25519:      {}", fingerprint(&x25519_pk_bytes));
+            println!("  ML-DSA-65:   {}", fingerprint(&mldsa_pk_bytes));
+            println!("  Ed25519:     {}", fingerprint(&ed25519_pk_bytes));
+        }
+        Err(e) => {
+            println!("  Error loading keystore: {e}");
+        }
+    }
+
+    // 3. Storage config
+    println!();
+    let config_path = vault_dir.join("config.toml");
+    if config_path.exists() {
+        println!("Storage: config.toml found");
+        let content = std::fs::read_to_string(&config_path).unwrap_or_default();
+        if let Ok(config) = content.parse::<toml::Value>() {
+            if let Some(s3) = config.get("storage").and_then(|s| s.get("s3")) {
+                let bucket = s3.get("bucket").and_then(|v| v.as_str()).unwrap_or("?");
+                let region = s3.get("region").and_then(|v| v.as_str()).unwrap_or("?");
+                let endpoint = s3
+                    .get("endpoint")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(default)");
+                println!("  S3 bucket:   {bucket}");
+                println!("  S3 region:   {region}");
+                println!("  S3 endpoint: {endpoint}");
+            }
+        }
+    } else {
+        println!("Storage: no config.toml (use --local for backups, or create config)");
+    }
+
+    // 4. Backup history
+    println!();
+    let manifests_dir = vault_dir.join("manifests");
+    if manifests_dir.exists() {
+        let mut manifests: Vec<_> = std::fs::read_dir(&manifests_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+            .collect();
+
+        manifests.sort_by_key(|e| std::cmp::Reverse(e.metadata().and_then(|m| m.modified()).ok()));
+
+        if manifests.is_empty() {
+            println!("Backups: none");
+        } else {
+            println!("Backups: {} total", manifests.len());
+            println!();
+
+            // Show most recent (up to 5)
+            let show_count = manifests.len().min(5);
+            for entry in manifests.iter().take(show_count) {
+                if let Ok(json) = std::fs::read_to_string(entry.path()) {
+                    if let Ok(m) = serde_json::from_str::<zk_vault::manifest::BackupManifest>(&json)
+                    {
+                        println!(
+                            "  {} | {} | {} files | {}",
+                            &m.backup_id.to_string()[..8],
+                            m.created_at.format("%Y-%m-%d %H:%M"),
+                            m.file_count,
+                            human_size(m.total_original_size),
+                        );
+                    }
+                }
+            }
+
+            if manifests.len() > show_count {
+                println!("  ... and {} more", manifests.len() - show_count);
+            }
+        }
+    } else {
+        println!("Backups: none");
+    }
+}
+
+/// BLAKE3 fingerprint of a public key (first 8 bytes, hex-encoded).
+fn fingerprint(pk_bytes: &[u8]) -> String {
+    if pk_bytes.is_empty() {
+        return "(invalid)".to_string();
+    }
+    let h = hash::hash(pk_bytes);
+    hex::encode(&h[..8])
+}
+
+/// Human-readable file size.
+fn human_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * 1024 * 1024;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
 }
