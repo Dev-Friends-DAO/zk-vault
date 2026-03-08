@@ -16,6 +16,9 @@ serde_json = "1"
 # Hashing
 blake3 = "1"
 
+# Cryptography
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+
 # Utilities
 hex = "0.4"
 thiserror = "2"
