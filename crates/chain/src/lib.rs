@@ -1,7 +1,8 @@
 //! zk-vault chain node: Malachite BFT consensus for Mode B/C.
 //!
-//! This crate will contain:
-//! - Malachite BFT consensus integration
-//! - Chain state machine (FileRegistry, validator set)
-//! - RPC server (gRPC/JSON-RPC)
-//! - P2P networking
+//! This crate contains:
+//! - Block and transaction types (`types`)
+//! - Malachite BFT Context implementation (`consensus`)
+
+pub mod consensus;
+pub mod types;

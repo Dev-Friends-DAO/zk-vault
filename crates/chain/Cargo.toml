@@ -2,12 +2,27 @@
 name = "zk-vault-chain"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.82"
 license = "AGPL-3.0-or-later"
 description = "Chain node for zk-vault: Malachite BFT consensus"
 
 [dependencies]
 zk-vault-core = { path = "../core" }
+
+# Serialization
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Hashing
+blake3 = "1"
+
+# Utilities
+hex = "0.4"
 thiserror = "2"
 tracing = "0.1"
+
+# Malachite BFT consensus
+informalsystems-malachitebft-core-types = "0.5"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
