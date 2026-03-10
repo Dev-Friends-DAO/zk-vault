@@ -48,9 +48,16 @@ enum Commands {
         /// Backup ID or path to manifest file
         #[arg()]
         backup: String,
+        /// Submit VerifyIntegrity attestation to chain (e.g., --chain http://localhost:3030)
+        #[arg(long)]
+        chain: Option<String>,
     },
     /// Show vault status
-    Status,
+    Status {
+        /// Query chain node status (e.g., --chain http://localhost:3030)
+        #[arg(long)]
+        chain: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -72,8 +79,8 @@ async fn main() {
             chain,
         } => cmd_backup(paths, local, chain).await,
         Commands::Restore { backup, output } => cmd_restore(backup, output).await,
-        Commands::Verify { backup } => cmd_verify(backup).await,
-        Commands::Status => cmd_status(),
+        Commands::Verify { backup, chain } => cmd_verify(backup, chain).await,
+        Commands::Status { chain } => cmd_status(chain).await,
     }
 }
 
@@ -767,7 +774,7 @@ async fn fetch_bundle(
     None
 }
 
-async fn cmd_verify(backup: String) {
+async fn cmd_verify(backup: String, chain_url: Option<String>) {
     // 1. Load manifest
     let manifest_path = resolve_manifest_path(&backup);
     let manifest_json = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
@@ -908,6 +915,82 @@ async fn cmd_verify(backup: String) {
         println!("Verification FAILED ({checks_failed} failed, {checks_passed} passed).");
         std::process::exit(1);
     }
+
+    // Submit VerifyIntegrity attestation to chain (only if all checks passed)
+    if let Some(chain_url) = chain_url {
+        if all_passed {
+            attest_on_chain(&chain_url, manifest.merkle_root).await;
+        } else {
+            eprintln!("Skipping chain attestation — verification failed.");
+        }
+    }
+}
+
+/// Submit a VerifyIntegrity attestation to the chain.
+async fn attest_on_chain(chain_url: &str, merkle_root: [u8; 32]) {
+    use ed25519_dalek::{Signer, SigningKey};
+
+    // Load and unlock keys for signing
+    let store = match keys::load_key_store() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Chain attestation: cannot load keystore ({e})");
+            return;
+        }
+    };
+
+    let passphrase = rpassword::prompt_password("Enter passphrase for chain attestation: ")
+        .expect("Failed to read passphrase");
+
+    let unlocked = match keys::unlock_all_keys(passphrase.as_bytes(), &store) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("Chain attestation: wrong passphrase ({e})");
+            return;
+        }
+    };
+
+    println!();
+    println!("Submitting VerifyIntegrity attestation ({chain_url})...");
+
+    let signing_key = SigningKey::from_bytes(&unlocked.ed25519_sk);
+    let signature = signing_key.sign(&merkle_root);
+
+    let tx = serde_json::json!({
+        "VerifyIntegrity": {
+            "merkle_root": merkle_root,
+            "verifier_pk": unlocked.ed25519_pk,
+            "signature": signature.to_bytes().to_vec(),
+        }
+    });
+    let tx_json = tx.to_string();
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/submit_tx", chain_url.trim_end_matches('/'));
+    let body = serde_json::json!({ "tx_json": tx_json });
+
+    match client.post(&url).json(&body).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+
+            if status.is_success() {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body_text) {
+                    let tx_hash = parsed["tx_hash"].as_str().unwrap_or("?");
+                    println!("  Chain attestation: SUCCESS");
+                    println!("  tx_hash: {tx_hash}");
+                } else {
+                    println!("  Chain attestation: SUCCESS");
+                }
+            } else {
+                eprintln!("  Chain attestation: FAILED (HTTP {status})");
+                eprintln!("  Response: {body_text}");
+            }
+        }
+        Err(e) => {
+            eprintln!("  Chain attestation: FAILED (connection error: {e})");
+        }
+    }
 }
 
 /// Check if a file exists in any of its storage locations.
@@ -935,7 +1018,7 @@ async fn check_file_exists(
     false
 }
 
-fn cmd_status() {
+async fn cmd_status(chain_url: Option<String>) {
     println!("zk-vault status");
     println!("===============");
 
@@ -1042,6 +1125,104 @@ fn cmd_status() {
         }
     } else {
         println!("Backups: none");
+    }
+
+    // 5. Chain status (if --chain was specified)
+    if let Some(chain_url) = chain_url {
+        query_chain_status(&chain_url).await;
+    }
+}
+
+/// Query chain node status and display it.
+async fn query_chain_status(chain_url: &str) {
+    println!();
+    println!("Chain: {chain_url}");
+
+    let client = reqwest::Client::new();
+    let base = chain_url.trim_end_matches('/');
+
+    // GET /status
+    match client.get(format!("{base}/status")).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let body = resp.text().await.unwrap_or_default();
+            if let Ok(status) = serde_json::from_str::<serde_json::Value>(&body) {
+                println!("  Height:      {}", status["height"]);
+                println!("  Files:       {}", status["file_count"]);
+                println!("  Validators:  {}", status["validator_count"]);
+                println!("  Pending txs: {}", status["pending_txs"]);
+                println!("  Committed:   {}", status["blocks_committed"]);
+                println!(
+                    "  State root:  {}",
+                    status["state_root"].as_str().unwrap_or("?")
+                );
+            }
+        }
+        Ok(resp) => {
+            eprintln!("  Chain status: HTTP {}", resp.status());
+        }
+        Err(e) => {
+            eprintln!("  Chain unreachable: {e}");
+        }
+    }
+
+    // Cross-reference local manifests with chain
+    let manifests_dir = keys::vault_dir().join("manifests");
+    if !manifests_dir.exists() {
+        return;
+    }
+
+    let manifest_files: Vec<_> = std::fs::read_dir(&manifests_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .collect();
+
+    if manifest_files.is_empty() {
+        return;
+    }
+
+    println!();
+    println!("On-chain status of local backups:");
+
+    for entry in &manifest_files {
+        let json = match std::fs::read_to_string(entry.path()) {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
+        let manifest: zk_vault_core::manifest::BackupManifest = match serde_json::from_str(&json) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        let merkle_hex = hex::encode(manifest.merkle_root);
+        let short_id = &manifest.backup_id.to_string()[..8];
+
+        // Query chain for this file
+        let req = serde_json::json!({ "merkle_root": merkle_hex });
+        match client
+            .post(format!("{base}/get_file"))
+            .json(&req)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let body = resp.text().await.unwrap_or_default();
+                if let Ok(file) = serde_json::from_str::<serde_json::Value>(&body) {
+                    let verifications = file["verification_count"].as_u64().unwrap_or(0);
+                    let registered_at = file["registered_at"].as_u64().unwrap_or(0);
+                    println!(
+                        "  {short_id} | registered (height {registered_at}, {verifications} verification(s))"
+                    );
+                }
+            }
+            Ok(_) => {
+                println!("  {short_id} | not registered");
+            }
+            Err(_) => {
+                println!("  {short_id} | query failed");
+            }
+        }
     }
 }
 

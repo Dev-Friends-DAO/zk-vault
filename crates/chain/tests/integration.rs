@@ -240,6 +240,137 @@ async fn submit_to_different_nodes() {
     }
 }
 
+/// E2E: simulates CLI backup → RegisterFile → propose → get_file → VerifyIntegrity
+#[tokio::test]
+async fn e2e_cli_backup_verify_flow() {
+    let net = TestNetwork::spawn(3).await;
+    let client = reqwest::Client::new();
+    let (sk, pk) = &net.keys[0];
+    let base = &net.urls[0];
+
+    // 1. Simulate CLI backup: create RegisterFile tx
+    let merkle_root = [0xDE; 32];
+    let file_count = 3u32;
+    let encrypted_size = 10240u64;
+    let sig = sk.sign(&merkle_root);
+    let tx = serde_json::json!({
+        "RegisterFile": {
+            "merkle_root": merkle_root,
+            "file_count": file_count,
+            "encrypted_size": encrypted_size,
+            "owner_pk": *pk,
+            "signature": sig.to_bytes().to_vec(),
+        }
+    });
+    let tx_json = tx.to_string();
+
+    // 2. Submit via RPC (like CLI --chain does)
+    let resp = client
+        .post(format!("{base}/submit_tx"))
+        .json(&rpc::SubmitTxRequest { tx_json })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let submit: SubmitTxResponse = resp.json().await.unwrap();
+    assert!(!submit.tx_hash.is_empty());
+
+    // 3. Verify pending
+    let status: StatusResponse = client
+        .get(format!("{base}/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status.pending_txs, 1);
+
+    // 4. Propose + broadcast
+    net.propose_and_broadcast();
+
+    // 5. Verify committed
+    let status: StatusResponse = client
+        .get(format!("{base}/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status.height, 1);
+    assert_eq!(status.file_count, 1);
+    assert_eq!(status.pending_txs, 0);
+
+    // 6. Query file (like CLI status --chain does)
+    let file_resp = client
+        .post(format!("{base}/get_file"))
+        .json(&rpc::GetFileRequest {
+            merkle_root: hex::encode(merkle_root),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(file_resp.status(), 200);
+    let file: rpc::FileResponse = file_resp.json().await.unwrap();
+    assert_eq!(file.file_count, file_count);
+    assert_eq!(file.encrypted_size, encrypted_size);
+    assert_eq!(file.owner_pk, hex::encode(pk));
+    assert_eq!(file.registered_at, 1);
+    assert_eq!(file.verification_count, 0);
+
+    // 7. Simulate CLI verify --chain: submit VerifyIntegrity tx
+    let verify_sig = sk.sign(&merkle_root);
+    let verify_tx = serde_json::json!({
+        "VerifyIntegrity": {
+            "merkle_root": merkle_root,
+            "verifier_pk": *pk,
+            "signature": verify_sig.to_bytes().to_vec(),
+        }
+    });
+    let verify_tx_json = verify_tx.to_string();
+
+    let resp = client
+        .post(format!("{base}/submit_tx"))
+        .json(&rpc::SubmitTxRequest {
+            tx_json: verify_tx_json,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // 8. Propose + broadcast again
+    net.propose_and_broadcast();
+
+    // 9. Verify verification_count increased
+    let file_resp = client
+        .post(format!("{base}/get_file"))
+        .json(&rpc::GetFileRequest {
+            merkle_root: hex::encode(merkle_root),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(file_resp.status(), 200);
+    let file: rpc::FileResponse = file_resp.json().await.unwrap();
+    assert_eq!(file.verification_count, 1);
+
+    // 10. Final status: height 2, 1 file, 0 pending
+    let status: StatusResponse = client
+        .get(format!("{base}/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status.height, 2);
+    assert_eq!(status.file_count, 1);
+    assert_eq!(status.pending_txs, 0);
+    assert_eq!(status.blocks_committed, 2);
+}
+
 #[tokio::test]
 async fn rejected_block_does_not_corrupt_state() {
     let net = TestNetwork::spawn(3).await;
