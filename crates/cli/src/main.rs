@@ -30,6 +30,9 @@ enum Commands {
         /// Save encrypted backups to a local directory (Layer 0)
         #[arg(long)]
         local: Option<PathBuf>,
+        /// Register backup on zk-vault chain (e.g., --chain http://localhost:3030)
+        #[arg(long)]
+        chain: Option<String>,
     },
     /// Restore files from a backup
     Restore {
@@ -63,7 +66,11 @@ async fn main() {
 
     match cli.command {
         Commands::Init => cmd_init(),
-        Commands::Backup { paths, local } => cmd_backup(paths, local).await,
+        Commands::Backup {
+            paths,
+            local,
+            chain,
+        } => cmd_backup(paths, local, chain).await,
         Commands::Restore { backup, output } => cmd_restore(backup, output).await,
         Commands::Verify { backup } => cmd_verify(backup).await,
         Commands::Status => cmd_status(),
@@ -233,7 +240,7 @@ fn save_manifest(manifest: &zk_vault_core::manifest::BackupManifest) -> std::io:
     Ok(path)
 }
 
-async fn cmd_backup(paths: Vec<PathBuf>, local_dir: Option<PathBuf>) {
+async fn cmd_backup(paths: Vec<PathBuf>, local_dir: Option<PathBuf>, chain_url: Option<String>) {
     // 1. Determine storage targets
     let config_path = keys::vault_dir().join("config.toml");
     let use_s3 = config_path.exists();
@@ -445,6 +452,79 @@ async fn cmd_backup(paths: Vec<PathBuf>, local_dir: Option<PathBuf>) {
         Err(e) => {
             eprintln!("Warning: Backup succeeded but manifest save failed: {e}");
             eprintln!("Merkle root: {}", hex::encode(merkle_root));
+        }
+    }
+
+    // 9. Register on chain (if --chain was specified)
+    if let Some(chain_url) = chain_url {
+        register_on_chain(
+            &chain_url,
+            merkle_root,
+            success_count as u32,
+            total_bytes,
+            &unlocked.ed25519_sk,
+            &unlocked.ed25519_pk,
+        )
+        .await;
+    }
+}
+
+/// Register a backup on the zk-vault chain by submitting a RegisterFile transaction.
+async fn register_on_chain(
+    chain_url: &str,
+    merkle_root: [u8; 32],
+    file_count: u32,
+    encrypted_size: u64,
+    ed25519_sk: &[u8; 32],
+    ed25519_pk: &[u8; 32],
+) {
+    use ed25519_dalek::{Signer, SigningKey};
+
+    println!();
+    println!("Registering backup on chain ({chain_url})...");
+
+    // Sign the merkle root with Ed25519
+    let signing_key = SigningKey::from_bytes(ed25519_sk);
+    let signature = signing_key.sign(&merkle_root);
+
+    // Build RegisterFile transaction JSON (matches zk-vault-chain types::Transaction)
+    let tx = serde_json::json!({
+        "RegisterFile": {
+            "merkle_root": merkle_root,
+            "file_count": file_count,
+            "encrypted_size": encrypted_size,
+            "owner_pk": *ed25519_pk,
+            "signature": signature.to_bytes().to_vec(),
+        }
+    });
+    let tx_json = tx.to_string();
+
+    // Submit to chain RPC
+    let client = reqwest::Client::new();
+    let url = format!("{}/submit_tx", chain_url.trim_end_matches('/'));
+    let body = serde_json::json!({ "tx_json": tx_json });
+
+    match client.post(&url).json(&body).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+
+            if status.is_success() {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body_text) {
+                    let tx_hash = parsed["tx_hash"].as_str().unwrap_or("?");
+                    println!("  Chain registration: SUCCESS");
+                    println!("  tx_hash: {tx_hash}");
+                } else {
+                    println!("  Chain registration: SUCCESS");
+                }
+            } else {
+                eprintln!("  Chain registration: FAILED (HTTP {status})");
+                eprintln!("  Response: {body_text}");
+            }
+        }
+        Err(e) => {
+            eprintln!("  Chain registration: FAILED (connection error: {e})");
+            eprintln!("  Backup data is safe. You can register later manually.");
         }
     }
 }

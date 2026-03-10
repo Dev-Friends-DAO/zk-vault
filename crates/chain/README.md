@@ -173,6 +173,20 @@ curl -s -X POST localhost:3030/get_file \
 # → owner_pk, file_count, registered_at, etc.
 ```
 
+## CLI Integration
+
+The `zk-vault` CLI can register backups on the chain automatically using the `--chain` flag:
+
+```bash
+# Backup + register on chain in one command
+zk-vault backup --local ./backups --chain http://localhost:3030 ./my-data
+
+# Then propose a block to commit the transaction
+curl -s -X POST localhost:3030/propose | jq
+```
+
+The CLI signs the backup's Merkle root with Ed25519 and submits a `RegisterFile` transaction to `/submit_tx`. Chain registration failure is non-fatal — backup data is already safely stored.
+
 ## Transaction Types
 
 | Type | Fields | Description |
