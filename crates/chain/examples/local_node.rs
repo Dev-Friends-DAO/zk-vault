@@ -97,6 +97,19 @@ async fn main() {
         .unwrap()
     );
     println!();
+    println!("# Upload encrypted data (Mode B)");
+    println!(
+        r#"curl -s -X POST {addr}/upload_data -H 'Content-Type: application/json' -d '{{"key":"my-blob","data_b64":"AQIDBA=="}}' | jq"#
+    );
+    println!();
+    println!("# Download encrypted data (Mode B)");
+    println!(
+        r#"curl -s -X POST {addr}/download_data -H 'Content-Type: application/json' -d '{{"key":"my-blob"}}' | jq"#
+    );
+    println!();
+    println!("# List stored blobs (Mode B)");
+    println!("curl -s {addr}/list_data | jq");
+    println!();
     println!("=========================================");
     println!();
 

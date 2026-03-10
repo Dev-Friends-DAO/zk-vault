@@ -7,6 +7,7 @@
 
 use tracing::info;
 
+use crate::blob_store::BlobStore;
 use crate::mempool::{BlockBuilder, Mempool, MempoolConfig, MempoolError};
 use crate::state::ChainState;
 use crate::types::{Address, Block, BlockId, Height, Transaction, ValidatorSet};
@@ -56,6 +57,8 @@ pub struct Node {
     config: NodeConfig,
     /// Number of blocks committed since genesis.
     blocks_committed: u64,
+    /// Encrypted data blob store (Mode B).
+    blob_store: BlobStore,
 }
 
 impl Node {
@@ -68,6 +71,7 @@ impl Node {
             mempool,
             config,
             blocks_committed: 0,
+            blob_store: BlobStore::new(),
         }
     }
 
@@ -80,6 +84,7 @@ impl Node {
             mempool,
             config,
             blocks_committed,
+            blob_store: BlobStore::new(),
         }
     }
 
@@ -192,6 +197,28 @@ impl Node {
     /// Look up a file entry by merkle root.
     pub fn get_file(&self, merkle_root: &[u8; 32]) -> Option<&crate::state::FileEntry> {
         self.state.get_file(merkle_root)
+    }
+
+    // ── Blob store operations (Mode B) ──
+
+    /// Store an encrypted data blob. Returns the size in bytes.
+    pub fn put_blob(&mut self, key: String, data: Vec<u8>) -> usize {
+        self.blob_store.put(key, data)
+    }
+
+    /// Retrieve an encrypted data blob by key.
+    pub fn get_blob(&self, key: &str) -> Option<&[u8]> {
+        self.blob_store.get(key)
+    }
+
+    /// List all blob keys stored on this node.
+    pub fn list_blobs(&self) -> Vec<&str> {
+        self.blob_store.keys()
+    }
+
+    /// Total bytes stored in the blob store.
+    pub fn blob_store_size(&self) -> u64 {
+        self.blob_store.total_size()
     }
 
     /// Get the current validator set.

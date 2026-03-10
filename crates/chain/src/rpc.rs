@@ -64,6 +64,44 @@ pub struct FileResponse {
     pub verification_count: usize,
 }
 
+/// Upload encrypted data blob request.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UploadDataRequest {
+    /// Storage key (hex-encoded merkle root or user-defined key).
+    pub key: String,
+    /// Base64-encoded encrypted data.
+    pub data_b64: String,
+}
+
+/// Upload encrypted data blob response.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UploadDataResponse {
+    pub key: String,
+    pub size: usize,
+}
+
+/// Download encrypted data blob request.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DownloadDataRequest {
+    /// Storage key.
+    pub key: String,
+}
+
+/// Download encrypted data blob response.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DownloadDataResponse {
+    pub key: String,
+    pub data_b64: String,
+    pub size: usize,
+}
+
+/// List stored data blobs response.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListDataResponse {
+    pub keys: Vec<String>,
+    pub total_size: u64,
+}
+
 /// Generic error response.
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
@@ -79,6 +117,9 @@ pub fn router(node: SharedNode) -> Router {
         .route("/submit_tx", post(handle_submit_tx))
         .route("/get_file", post(handle_get_file))
         .route("/propose", post(handle_propose))
+        .route("/upload_data", post(handle_upload_data))
+        .route("/download_data", post(handle_download_data))
+        .route("/list_data", get(handle_list_data))
         .route("/health", get(handle_health))
         .with_state(node)
 }
@@ -212,6 +253,63 @@ async fn handle_propose(
         "height": height,
         "tx_count": tx_count,
     })))
+}
+
+// ── Blob store handlers (Mode B) ──
+
+async fn handle_upload_data(
+    State(node): State<SharedNode>,
+    Json(req): Json<UploadDataRequest>,
+) -> Result<Json<UploadDataResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(&req.data_b64)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Invalid base64: {e}"),
+                }),
+            )
+        })?;
+
+    let mut node = node.lock().unwrap();
+    let size = node.put_blob(req.key.clone(), data);
+    info!(key = %req.key, size, "blob uploaded");
+
+    Ok(Json(UploadDataResponse { key: req.key, size }))
+}
+
+async fn handle_download_data(
+    State(node): State<SharedNode>,
+    Json(req): Json<DownloadDataRequest>,
+) -> Result<Json<DownloadDataResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use base64::Engine;
+    let node = node.lock().unwrap();
+    let data = node.get_blob(&req.key).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Blob not found: {}", req.key),
+            }),
+        )
+    })?;
+
+    let data_b64 = base64::engine::general_purpose::STANDARD.encode(data);
+    let size = data.len();
+
+    Ok(Json(DownloadDataResponse {
+        key: req.key,
+        data_b64,
+        size,
+    }))
+}
+
+async fn handle_list_data(State(node): State<SharedNode>) -> Json<ListDataResponse> {
+    let node = node.lock().unwrap();
+    let keys: Vec<String> = node.list_blobs().into_iter().map(String::from).collect();
+    let total_size = node.blob_store_size();
+    Json(ListDataResponse { keys, total_size })
 }
 
 #[cfg(test)]
@@ -472,5 +570,128 @@ mod tests {
         assert_eq!(status.file_count, 3);
         assert_eq!(status.pending_txs, 0);
         assert_eq!(status.blocks_committed, 1);
+    }
+
+    // ── Blob store (Mode B) tests ──
+
+    #[tokio::test]
+    async fn upload_and_download_blob() {
+        use base64::Engine;
+        let (base, _, _) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+
+        let data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03];
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+
+        // Upload
+        let resp = client
+            .post(format!("{base}/upload_data"))
+            .json(&UploadDataRequest {
+                key: "test-blob-1".to_string(),
+                data_b64: data_b64.clone(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let upload: UploadDataResponse = resp.json().await.unwrap();
+        assert_eq!(upload.key, "test-blob-1");
+        assert_eq!(upload.size, 7);
+
+        // Download
+        let resp = client
+            .post(format!("{base}/download_data"))
+            .json(&DownloadDataRequest {
+                key: "test-blob-1".to_string(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let download: DownloadDataResponse = resp.json().await.unwrap();
+        assert_eq!(download.key, "test-blob-1");
+        assert_eq!(download.size, 7);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&download.data_b64)
+            .unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[tokio::test]
+    async fn download_blob_not_found() {
+        let (base, _, _) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("{base}/download_data"))
+            .json(&DownloadDataRequest {
+                key: "nonexistent".to_string(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn list_data_empty_then_populated() {
+        use base64::Engine;
+        let (base, _, _) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+
+        // Empty
+        let resp: ListDataResponse = client
+            .get(format!("{base}/list_data"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(resp.keys.is_empty());
+        assert_eq!(resp.total_size, 0);
+
+        // Upload two blobs
+        for key in ["blob-a", "blob-b"] {
+            let data_b64 = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 100]);
+            client
+                .post(format!("{base}/upload_data"))
+                .json(&UploadDataRequest {
+                    key: key.to_string(),
+                    data_b64,
+                })
+                .send()
+                .await
+                .unwrap();
+        }
+
+        // List
+        let resp: ListDataResponse = client
+            .get(format!("{base}/list_data"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(resp.keys.len(), 2);
+        assert_eq!(resp.total_size, 200);
+    }
+
+    #[tokio::test]
+    async fn upload_invalid_base64_rejected() {
+        let (base, _, _) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("{base}/upload_data"))
+            .json(&UploadDataRequest {
+                key: "bad".to_string(),
+                data_b64: "not-valid-base64!!!".to_string(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
     }
 }
