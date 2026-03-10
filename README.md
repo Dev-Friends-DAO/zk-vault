@@ -234,9 +234,73 @@ See [docs/PRODUCT.md](docs/PRODUCT.md) for the full impact analysis.
 | Bitcoin | `rust-bitcoin` |
 | Ethereum | `alloy` |
 
+## Development
+
+### Workspace Structure
+
+```
+zk-vault/
+├── crates/
+│   ├── core/    # Crypto library (encryption, keys, Merkle trees, manifests)
+│   ├── cli/     # CLI binary (`zk-vault`)
+│   └── chain/   # Chain node (consensus, state, mempool, RPC)
+```
+
+### Build & Test
+
+```bash
+# Build all crates
+cargo build --workspace
+
+# Run all tests (core + cli + chain unit + chain integration)
+cargo test --workspace
+
+# Run only chain crate tests
+cargo test -p zk-vault-chain
+
+# Lint
+cargo clippy --workspace -- -D warnings
+```
+
+### Chain Node (Local Dev)
+
+Start a single-node chain for local development:
+
+```bash
+cargo run -p zk-vault-chain --example local_node
+```
+
+Then interact with the RPC endpoints:
+
+```bash
+# Health check
+curl localhost:3030/health
+
+# Node status (height, file count, validators, pending txs)
+curl -s localhost:3030/status | jq
+
+# Submit a transaction (copy the command printed at startup)
+curl -s -X POST localhost:3030/submit_tx \
+  -H 'Content-Type: application/json' \
+  -d '{"tx_json":"..."}' | jq
+
+# Propose and commit a block
+curl -s -X POST localhost:3030/propose | jq
+
+# Query a registered file by merkle root
+curl -s -X POST localhost:3030/get_file \
+  -H 'Content-Type: application/json' \
+  -d '{"merkle_root":"abab...64 hex chars...abab"}' | jq
+```
+
+Typical flow: `status` → `submit_tx` → `status` (pending: 1) → `propose` → `status` (height: 1, files: 1) → `get_file`
+
+See [crates/chain/README.md](crates/chain/README.md) for detailed chain documentation.
+
 ## Documentation
 
 - **[docs/PRODUCT.md](docs/PRODUCT.md)** — Full product vision, architecture details, and design exploration (includes items under consideration)
+- **[crates/chain/README.md](crates/chain/README.md)** — Chain node architecture, modules, and RPC reference
 
 ## License
 
