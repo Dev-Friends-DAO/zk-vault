@@ -136,7 +136,7 @@ impl ChainState {
     }
 
     /// Apply a single transaction to the state.
-    fn apply_tx(&mut self, tx: &Transaction, height: Height) -> Result<()> {
+    pub(crate) fn apply_tx(&mut self, tx: &Transaction, height: Height) -> Result<()> {
         match tx {
             Transaction::RegisterFile {
                 merkle_root,

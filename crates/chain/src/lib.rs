@@ -5,5 +5,6 @@
 //! - Malachite BFT Context implementation (`consensus`)
 
 pub mod consensus;
+pub mod mempool;
 pub mod state;
 pub mod types;
