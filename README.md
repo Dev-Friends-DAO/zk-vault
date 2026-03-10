@@ -249,113 +249,24 @@ zk-vault/
 ### Build & Test
 
 ```bash
-# Build all crates
-cargo build --workspace
-
-# Run all tests (core + cli + chain unit + chain integration)
-cargo test --workspace
-
-# Run individual crate tests
-cargo test -p zk-vault-core       # 60 tests (crypto, merkle, manifest, restore)
-cargo test -p zk-vault-chain      # 57 tests (51 unit + 6 integration)
-cargo test -p zk-vault-chain --lib          # unit tests only
-cargo test -p zk-vault-chain --test integration  # integration tests only
-
-# Lint & format
+cargo build --workspace          # build all crates
+cargo test --workspace           # all tests (117 total)
 cargo clippy --workspace -- -D warnings
-cargo fmt                         # auto-format
-cargo fmt -- --check              # check formatting (CI)
-
-# Help
-zk-vault --help
-zk-vault backup --help
+cargo fmt
 ```
 
-### Pre-commit Hooks (lefthook)
-
-The project uses [lefthook](https://github.com/evilmartians/lefthook) for pre-commit checks:
-
-```bash
-# Install lefthook (if not already)
-brew install lefthook   # or: cargo install lefthook
-lefthook install
-
-# Runs automatically on git commit:
-#   1. cargo fmt (auto-fix)
-#   2. cargo fmt -- --check
-#   3. cargo clippy -- -D warnings
-#   4. cargo test
-```
-
-### CLI Usage
+### Quick Start
 
 ```bash
 zk-vault init                                    # generate keys
 zk-vault backup --local ./backups ./my-data      # encrypt + backup
-zk-vault backup --local ./bk --chain http://localhost:3030 ./data  # backup + chain
-zk-vault restore <backup-id> -o ./restored       # decrypt + restore
+zk-vault backup --local ./bk --chain http://localhost:3030 ./data  # + chain
 zk-vault verify <backup-id>                      # check integrity
+zk-vault restore <backup-id> -o ./restored       # decrypt + restore
 zk-vault status                                  # show vault info
 ```
 
-See [docs/CLI.md](docs/CLI.md) for full CLI reference (all flags, config setup, examples).
-
-### Chain Node (Local Dev)
-
-Start a single-node chain for local development:
-
-```bash
-cargo run -p zk-vault-chain --example local_node
-```
-
-Then interact with the RPC endpoints:
-
-```bash
-# Health check
-curl localhost:3030/health
-
-# Node status (height, file count, validators, pending txs)
-curl -s localhost:3030/status | jq
-
-# Submit a transaction (copy the command printed at startup)
-curl -s -X POST localhost:3030/submit_tx \
-  -H 'Content-Type: application/json' \
-  -d '{"tx_json":"..."}' | jq
-
-# Propose and commit a block
-curl -s -X POST localhost:3030/propose | jq
-
-# Query a registered file by merkle root
-curl -s -X POST localhost:3030/get_file \
-  -H 'Content-Type: application/json' \
-  -d '{"merkle_root":"abab...64 hex chars...abab"}' | jq
-```
-
-Typical flow: `status` → `submit_tx` → `status` (pending: 1) → `propose` → `status` (height: 1, files: 1) → `get_file`
-
-### End-to-End: CLI + Chain
-
-```bash
-# 1. Start chain node (in a separate terminal)
-cargo run -p zk-vault-chain --example local_node
-
-# 2. Initialize vault
-zk-vault init
-
-# 3. Backup with chain registration
-zk-vault backup --local ./backups --chain http://localhost:3030 ./my-data
-# → Backup complete. Chain registration: SUCCESS (tx_hash: ...)
-
-# 4. Propose a block to commit the transaction
-curl -s -X POST localhost:3030/propose | jq
-# → height: 1, tx_count: 1
-
-# 5. Verify the file is on-chain
-curl -s localhost:3030/status | jq
-# → file_count: 1
-```
-
-See [crates/chain/README.md](crates/chain/README.md) for detailed chain documentation.
+See [docs/CLI.md](docs/CLI.md) for full command reference (all flags, chain RPC, config, dev commands, E2E workflows).
 
 ## Documentation
 

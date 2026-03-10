@@ -1,22 +1,15 @@
-# zk-vault CLI Reference
+# zk-vault Command Reference
 
-## Install
+All CLI commands, chain RPC endpoints, and development commands in one place.
+
+## CLI Commands
+
+### Install
 
 ```bash
 cargo build -p zk-vault-cli --release
 # Binary: target/release/zk-vault
 ```
-
-## Quick Start
-
-```bash
-zk-vault init                                    # generate keys
-zk-vault backup --local ./backups ./my-data      # encrypt + backup
-zk-vault verify <backup-id>                      # check integrity
-zk-vault restore <backup-id> -o ./restored       # decrypt + restore
-```
-
-## Commands
 
 ### `zk-vault init`
 
@@ -39,14 +32,12 @@ Encrypt files and store them to one or more targets.
 zk-vault backup [OPTIONS] <PATHS>...
 ```
 
-**Options:**
-
 | Flag | Description |
 |---|---|
 | `--local <DIR>` | Save encrypted backups to a local directory (Layer 0) |
 | `--chain <URL>` | Register backup on zk-vault chain (e.g., `http://localhost:3030`) |
 
-**Storage targets:**
+**Storage target combinations:**
 
 ```bash
 # Local only (Mode A — Layer 0)
@@ -73,7 +64,7 @@ zk-vault backup --local ./backups --chain http://localhost:3030 ./my-data
 4. Saves manifest to `~/.zk-vault/manifests/<backup-id>.json`
 5. If `--chain`: signs Merkle root with Ed25519, submits `RegisterFile` tx to chain RPC
 
-**Chain registration** is non-fatal — if the chain is unreachable, backup data is already saved. You can register later manually via `curl`.
+Chain registration is non-fatal — if the chain is unreachable, backup data is already saved.
 
 ### `zk-vault restore`
 
@@ -83,18 +74,13 @@ Decrypt and restore files from a backup.
 zk-vault restore <BACKUP> [-o <OUTPUT>]
 ```
 
-**Arguments:**
-
 | Arg | Description |
 |---|---|
 | `<BACKUP>` | Backup ID (UUID) or path to a manifest `.json` file |
 | `-o, --output <DIR>` | Output directory (default: `.`) |
 
 ```bash
-# Restore by backup ID
 zk-vault restore 019533a2-... -o ./restored
-
-# Restore by manifest path
 zk-vault restore ~/.zk-vault/manifests/019533a2-....json -o ./restored
 ```
 
@@ -115,19 +101,12 @@ Verify backup integrity without decrypting.
 zk-vault verify <BACKUP>
 ```
 
-**Checks performed:**
-
 | # | Check | Description |
 |---|---|---|
 | 1 | Merkle root integrity | Recompute Merkle tree from manifest and compare roots |
-| 2 | Storage availability | Check that all encrypted bundles exist in at least one storage location |
-| 3 | Bundle hash verification | Download bundles and verify they parse as valid encrypted bundles |
+| 2 | Storage availability | Check all encrypted bundles exist in at least one location |
+| 3 | Bundle hash verification | Download bundles and verify they parse correctly |
 | 4 | Manifest consistency | Verify file_count and size totals match |
-
-```bash
-zk-vault verify 019533a2-...
-# → Verification PASSED (4/4 checks).
-```
 
 ### `zk-vault status`
 
@@ -137,16 +116,109 @@ Show vault status: keys, storage config, and recent backups.
 zk-vault status
 ```
 
-**Output includes:**
+Output: vault path, keystore version, public key fingerprints, S3 config, recent backups (up to 5).
 
-- Vault path and keystore version
-- Public key fingerprints (BLAKE3, first 8 bytes)
-- S3 storage config (bucket, region, endpoint)
-- Recent backups (up to 5, sorted by date)
+---
+
+## Chain RPC Endpoints
+
+Default address: `http://127.0.0.1:3030`
+
+Start a local dev node:
+
+```bash
+cargo run -p zk-vault-chain --example local_node
+```
+
+### GET /health
+
+```bash
+curl localhost:3030/health
+# ok
+```
+
+### GET /status
+
+```bash
+curl -s localhost:3030/status | jq
+```
+
+```json
+{
+  "height": 0,
+  "last_block_id": "a1b2c3...",
+  "state_root": "d4e5f6...",
+  "file_count": 0,
+  "validator_count": 3,
+  "pending_txs": 0,
+  "blocks_committed": 0
+}
+```
+
+### POST /submit_tx
+
+Submit a transaction to the mempool. Pre-validated (signature check, state check) before acceptance.
+
+```bash
+curl -s -X POST localhost:3030/submit_tx \
+  -H 'Content-Type: application/json' \
+  -d '{"tx_json":"{\"RegisterFile\":{...}}"}' | jq
+```
+
+```json
+{ "tx_hash": "abc123..." }
+```
+
+Errors: `400` (invalid JSON), `422` (pre-validation failed).
+
+### POST /propose
+
+Trigger a propose + decide cycle (testing / single-validator mode).
+
+```bash
+curl -s -X POST localhost:3030/propose | jq
+```
+
+```json
+{ "height": 1, "tx_count": 3 }
+```
+
+### POST /get_file
+
+Query a registered file by merkle root (64 hex chars).
+
+```bash
+curl -s -X POST localhost:3030/get_file \
+  -H 'Content-Type: application/json' \
+  -d '{"merkle_root":"abababab...64 hex chars..."}' | jq
+```
+
+```json
+{
+  "merkle_root": "abab...",
+  "owner_pk": "0102...",
+  "file_count": 5,
+  "encrypted_size": 10240,
+  "registered_at": 1,
+  "verification_count": 0
+}
+```
+
+Errors: `400` (invalid hex or wrong length), `404` (file not found).
+
+### Transaction Types
+
+| Type | Fields | Description |
+|---|---|---|
+| `RegisterFile` | `merkle_root`, `file_count`, `encrypted_size`, `owner_pk`, `signature` | Register a new backup on-chain |
+| `VerifyIntegrity` | `merkle_root`, `verifier_pk`, `signature` | Attest integrity of an existing backup |
+| `UpdateValidatorSet` | `validators`, `signature` | Governance: update the validator set |
+
+---
 
 ## Configuration
 
-The CLI reads `~/.zk-vault/config.toml` for S3 storage settings.
+### `~/.zk-vault/config.toml`
 
 ```bash
 cp config.example.toml ~/.zk-vault/config.toml
@@ -164,7 +236,7 @@ secret_key = ""
 
 If no config exists, use `--local` for local-only backups.
 
-## File Layout
+### File Layout
 
 ```
 ~/.zk-vault/
@@ -175,15 +247,95 @@ If no config exists, use `--local` for local-only backups.
     └── <backup-id-2>.json
 ```
 
-## Environment Variables
+### Environment Variables
 
 | Variable | Description |
 |---|---|
 | `RUST_LOG` | Logging level (e.g., `RUST_LOG=zk_vault=debug`) |
 
-## Examples
+---
 
-### Full E2E: backup → chain → verify
+## Development Commands
+
+### Build
+
+```bash
+cargo build --workspace                    # build all crates
+cargo build -p zk-vault-cli --release      # release binary
+```
+
+### Test
+
+```bash
+cargo test --workspace                     # all tests (117 total)
+cargo test -p zk-vault-core               # core: 60 tests
+cargo test -p zk-vault-chain              # chain: 57 tests (51 unit + 6 integration)
+cargo test -p zk-vault-chain --lib        # chain unit tests only
+cargo test -p zk-vault-chain --test integration  # chain integration tests only
+cargo test -p zk-vault-cli               # CLI tests
+cargo test -- --nocapture                 # with output
+```
+
+### Lint & Format
+
+```bash
+cargo clippy --workspace -- -D warnings
+cargo fmt                                  # auto-format
+cargo fmt -- --check                       # check formatting (CI)
+```
+
+### Pre-commit Hooks (lefthook)
+
+```bash
+brew install lefthook   # or: cargo install lefthook
+lefthook install
+```
+
+Runs automatically on `git commit`:
+1. `cargo fmt` (auto-fix)
+2. `cargo fmt -- --check`
+3. `cargo clippy -- -D warnings`
+4. `cargo test`
+
+---
+
+## End-to-End Workflow
+
+### Chain node workflow (curl)
+
+```bash
+# 1. Start node
+cargo run -p zk-vault-chain --example local_node
+
+# 2. Check genesis status
+curl -s localhost:3030/status | jq
+# → height: 0, file_count: 0
+
+# 3. Submit transaction (copy from startup output)
+curl -s -X POST localhost:3030/submit_tx \
+  -H 'Content-Type: application/json' \
+  -d '{"tx_json":"..."}' | jq
+# → tx_hash: "abc..."
+
+# 4. Verify pending
+curl -s localhost:3030/status | jq
+# → pending_txs: 1
+
+# 5. Commit block
+curl -s -X POST localhost:3030/propose | jq
+# → height: 1, tx_count: 1
+
+# 6. Verify committed
+curl -s localhost:3030/status | jq
+# → height: 1, file_count: 1, pending_txs: 0
+
+# 7. Query the file
+curl -s -X POST localhost:3030/get_file \
+  -H 'Content-Type: application/json' \
+  -d '{"merkle_root":"abab..."}' | jq
+```
+
+### CLI + Chain (E2E)
 
 ```bash
 # Terminal 1: Start chain node
