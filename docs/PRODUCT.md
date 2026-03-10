@@ -571,6 +571,21 @@ All users' individual Merkle roots are aggregated into a single "super root," an
 | 1,000 | ~$0.0005 |
 | 100,000 | ~$0.000005 |
 
+### When anchoring matters (and when it doesn't)
+
+Anchoring is not equally valuable across all modes:
+
+| Context | Value | Rationale |
+|---|---|---|
+| Mode B/C (early stage, few validators) | **High** | The zk-vault chain's BFT is only as trustworthy as its validator set. With 3-7 PoA validators, collusion is theoretically possible. BTC/ETH anchors provide an external, independently verifiable trust root that no validator subset can rewrite. |
+| Mode B/C (mature, many validators) | **Medium** | As the validator set grows and transitions to DPoS, chain-internal security strengthens. Anchoring remains valuable as insurance and for composability (external systems can verify without trusting the zk-vault chain). |
+| Mode A (Personal) | **Low** | The user controls both encryption and storage. Tampering would be self-inflicted. Local Merkle verification is sufficient. Anchoring is available as opt-in but not the default. |
+| Legal / compliance use cases | **High** | Third-party proof that data existed at a specific time, anchored to Bitcoin's immutability, is meaningful for legal evidence and regulatory compliance. |
+
+**Key limitation:** Anchoring proves *existence and integrity*, not *availability*. It answers "has this data been tampered with?" but not "can I still retrieve this data?" Availability is addressed separately by Mode B replication, Mode C PoSt, and Layer 0 local backup.
+
+**Design decision:** Mode A defaults to anchoring OFF (opt-in). Mode B/C defaults to anchoring ON. This avoids charging personal users for a guarantee they don't need while preserving it where it provides real security value.
+
 ### Future: ZKP-Enhanced Anchoring
 
 Currently, the anchor proves "this hash existed at this time." With ZKP (see Section 7), the anchor could prove: "this hash was correctly computed from N files that were correctly encrypted and stored" — transforming the anchor from a timestamp into a verified commitment.
