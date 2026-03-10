@@ -298,7 +298,7 @@ zk-vault verify <backup-id>                      # check integrity
 zk-vault status                                  # show vault info
 ```
 
-See [docs/cli.md](docs/cli.md) for full CLI reference (all flags, config setup, examples).
+See [docs/CLI.md](docs/CLI.md) for full CLI reference (all flags, config setup, examples).
 
 ### Chain Node (Local Dev)
 
@@ -360,7 +360,7 @@ See [crates/chain/README.md](crates/chain/README.md) for detailed chain document
 ## Documentation
 
 - **[docs/PRODUCT.md](docs/PRODUCT.md)** — Full product vision, architecture details, and design exploration
-- **[docs/cli.md](docs/cli.md)** — CLI reference (all commands, flags, config, examples)
+- **[docs/CLI.md](docs/CLI.md)** — CLI reference (all commands, flags, config, examples)
 - **[crates/chain/README.md](crates/chain/README.md)** — Chain node architecture, modules, and RPC reference
 - **[config.example.toml](config.example.toml)** — Storage and anchoring configuration reference
 
