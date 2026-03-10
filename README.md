@@ -229,10 +229,14 @@ See [docs/PRODUCT.md](docs/PRODUCT.md) for the full impact analysis.
 | Classical KEM | `x25519-dalek` |
 | Classical Signatures | `ed25519-dalek` |
 | Hashing | `blake3` |
-| KDF | `argon2` |
+| KDF | `argon2` (Argon2id) |
 | Memory safety | `zeroize` |
-| Bitcoin | `rust-bitcoin` |
-| Ethereum | `alloy` |
+| BFT Consensus | `malachitebft` (Informal Systems) |
+| HTTP Server | `axum` |
+| S3 Storage | `rust-s3` |
+| Bitcoin anchoring | `bitcoin` (rust-bitcoin) |
+| Ethereum anchoring | `alloy` |
+| CLI | `clap` |
 
 ## Development
 
