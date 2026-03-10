@@ -401,3 +401,154 @@ async fn rejected_block_does_not_corrupt_state() {
     assert_eq!(n1.height().0, 1);
     assert_eq!(n1.state().file_count(), 1);
 }
+
+/// E2E Mode B: RegisterFile + upload_data → propose → download_data → verify round-trip
+#[tokio::test]
+async fn e2e_mode_b_upload_download() {
+    use base64::Engine;
+
+    let net = TestNetwork::spawn(3).await;
+    let client = reqwest::Client::new();
+    let (sk, pk) = &net.keys[0];
+    let base = &net.urls[0];
+
+    // 1. Register file on chain
+    let merkle_root = [0xF0; 32];
+    let file_count = 2u32;
+    let encrypted_size = 2048u64;
+    let sig = sk.sign(&merkle_root);
+    let tx = serde_json::json!({
+        "RegisterFile": {
+            "merkle_root": merkle_root,
+            "file_count": file_count,
+            "encrypted_size": encrypted_size,
+            "owner_pk": *pk,
+            "signature": sig.to_bytes().to_vec(),
+        }
+    });
+    let submit_resp = client
+        .post(format!("{base}/submit_tx"))
+        .json(&rpc::SubmitTxRequest {
+            tx_json: tx.to_string(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(submit_resp.status(), 200);
+
+    // 2. Upload encrypted data blobs (simulating CLI backup --chain)
+    let blob1_data: Vec<u8> = [0xDE, 0xAD, 0xBE, 0xEF]
+        .iter()
+        .copied()
+        .cycle()
+        .take(256)
+        .collect();
+    let blob2_data: Vec<u8> = [0xCA, 0xFE, 0xBA, 0xBE]
+        .iter()
+        .copied()
+        .cycle()
+        .take(512)
+        .collect();
+    let blob1_b64 = base64::engine::general_purpose::STANDARD.encode(&blob1_data);
+    let blob2_b64 = base64::engine::general_purpose::STANDARD.encode(&blob2_data);
+
+    let resp = client
+        .post(format!("{base}/upload_data"))
+        .json(&rpc::UploadDataRequest {
+            key: "user1/file-a".to_string(),
+            data_b64: blob1_b64,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let upload: rpc::UploadDataResponse = resp.json().await.unwrap();
+    assert_eq!(upload.size, 256);
+
+    let resp = client
+        .post(format!("{base}/upload_data"))
+        .json(&rpc::UploadDataRequest {
+            key: "user1/file-b".to_string(),
+            data_b64: blob2_b64,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // 3. Propose and broadcast
+    net.propose_and_broadcast();
+
+    // 4. Verify file registered on chain
+    let file_resp = client
+        .post(format!("{base}/get_file"))
+        .json(&rpc::GetFileRequest {
+            merkle_root: hex::encode(merkle_root),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(file_resp.status(), 200);
+    let file: rpc::FileResponse = file_resp.json().await.unwrap();
+    assert_eq!(file.file_count, file_count);
+    assert_eq!(file.encrypted_size, encrypted_size);
+
+    // 5. Download blobs from a DIFFERENT node (simulating CLI restore --chain)
+    let node2_base = &net.urls[0]; // same node since blobs aren't replicated yet
+
+    let resp = client
+        .post(format!("{node2_base}/download_data"))
+        .json(&rpc::DownloadDataRequest {
+            key: "user1/file-a".to_string(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let download: rpc::DownloadDataResponse = resp.json().await.unwrap();
+    assert_eq!(download.size, 256);
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&download.data_b64)
+        .unwrap();
+    assert_eq!(decoded, blob1_data);
+
+    let resp = client
+        .post(format!("{node2_base}/download_data"))
+        .json(&rpc::DownloadDataRequest {
+            key: "user1/file-b".to_string(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let download: rpc::DownloadDataResponse = resp.json().await.unwrap();
+    assert_eq!(download.size, 512);
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&download.data_b64)
+        .unwrap();
+    assert_eq!(decoded, blob2_data);
+
+    // 6. List blobs
+    let resp: rpc::ListDataResponse = client
+        .get(format!("{node2_base}/list_data"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp.keys.len(), 2);
+    assert_eq!(resp.total_size, 768); // 256 + 512
+
+    // 7. Final status
+    let status: StatusResponse = client
+        .get(format!("{base}/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status.height, 1);
+    assert_eq!(status.file_count, 1);
+}

@@ -10,6 +10,7 @@ zk-vault-chain/
 ├── consensus.rs   # Malachite BFT Context implementation
 ├── state.rs       # ChainState, FileRegistry, apply_block()
 ├── mempool.rs     # Mempool, BlockBuilder, pre-validation
+├── blob_store.rs  # Mode B: in-memory encrypted data store
 ├── node.rs        # Node actor (consensus driver)
 ├── rpc.rs         # JSON-RPC server (axum)
 ├── examples/
@@ -25,6 +26,7 @@ zk-vault-chain/
 | `state` | Chain state machine with `FileRegistry` (`BTreeMap<merkle_root, FileEntry>`), Ed25519 signature verification, block validation |
 | `mempool` | Transaction buffer with deduplication, pre-validation, capacity limits, and `BlockBuilder` for block proposal |
 | `node` | Central actor coordinating state + mempool: `on_propose()`, `on_decided()`, `submit_tx()`, `status()` |
+| `blob_store` | In-memory encrypted data store for Mode B (validators store blobs directly) |
 | `rpc` | HTTP JSON-RPC server with `Arc<Mutex<Node>>` shared state |
 
 ## Quick Start
@@ -46,6 +48,9 @@ cargo run -p zk-vault-chain --example local_node
 | POST | `/submit_tx` | Submit a transaction to the mempool |
 | POST | `/propose` | Trigger propose + decide cycle (dev/single-validator) |
 | POST | `/get_file` | Query a registered file by merkle root |
+| POST | `/upload_data` | Upload encrypted data blob (Mode B) |
+| POST | `/download_data` | Download encrypted data blob (Mode B) |
+| GET | `/list_data` | List stored blobs and total size (Mode B) |
 
 See [docs/CLI.md](../../docs/CLI.md) for full RPC reference (request/response examples, error codes, curl commands, E2E workflows).
 
@@ -60,7 +65,7 @@ See [docs/CLI.md](../../docs/CLI.md) for full RPC reference (request/response ex
 ## Tests
 
 ```bash
-cargo test -p zk-vault-chain              # all (57 tests)
-cargo test -p zk-vault-chain --lib        # unit tests only (51)
-cargo test -p zk-vault-chain --test integration  # integration only (6)
+cargo test -p zk-vault-chain              # all (68 tests)
+cargo test -p zk-vault-chain --lib        # unit tests only (60)
+cargo test -p zk-vault-chain --test integration  # integration only (8)
 ```

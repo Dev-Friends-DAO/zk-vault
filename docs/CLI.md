@@ -49,10 +49,13 @@ zk-vault backup ./my-data
 # S3 + local
 zk-vault backup --local ./backups ./my-data
 
-# Local + chain registration
+# Chain only (Mode B — validators store data)
+zk-vault backup --chain http://localhost:3030 ./my-data
+
+# Local + chain (Mode B + Layer 0)
 zk-vault backup --local ./backups --chain http://localhost:3030 ./my-data
 
-# S3 + local + chain registration
+# S3 + local + chain
 zk-vault backup --local ./backups --chain http://localhost:3030 ./my-data
 ```
 
@@ -63,24 +66,32 @@ zk-vault backup --local ./backups --chain http://localhost:3030 ./my-data
 3. Builds BLAKE3 Merkle tree from all encrypted file hashes
 4. Saves manifest to `~/.zk-vault/manifests/<backup-id>.json`
 5. If `--chain`: signs Merkle root with Ed25519, submits `RegisterFile` tx to chain RPC
+6. If `--chain`: uploads encrypted data bundles to chain validators via `/upload_data` (Mode B)
 
-Chain registration is non-fatal — if the chain is unreachable, backup data is already saved.
+Chain registration and upload are non-fatal — if the chain is unreachable, backup data is already saved locally.
 
 ### `zk-vault restore`
 
 Decrypt and restore files from a backup.
 
 ```bash
-zk-vault restore <BACKUP> [-o <OUTPUT>]
+zk-vault restore <BACKUP> [-o <OUTPUT>] [--chain <URL>]
 ```
 
-| Arg | Description |
+| Arg / Flag | Description |
 |---|---|
 | `<BACKUP>` | Backup ID (UUID) or path to a manifest `.json` file |
 | `-o, --output <DIR>` | Output directory (default: `.`) |
+| `--chain <URL>` | Download from chain node (Mode B) (e.g., `http://localhost:3030`) |
 
 ```bash
+# Restore from local / S3
 zk-vault restore 019533a2-... -o ./restored
+
+# Restore from chain (Mode B)
+zk-vault restore 019533a2-... -o ./restored --chain http://localhost:3030
+
+# With explicit manifest path
 zk-vault restore ~/.zk-vault/manifests/019533a2-....json -o ./restored
 ```
 
@@ -88,7 +99,7 @@ zk-vault restore ~/.zk-vault/manifests/019533a2-....json -o ./restored
 
 1. Loads and verifies manifest (Merkle root integrity check)
 2. Unlocks keys with passphrase
-3. Downloads encrypted bundles (tries local first, then S3)
+3. Downloads encrypted bundles (tries: local → S3 → chain, in order per storage location)
 4. Decapsulates hybrid KEM → recovers per-file symmetric key
 5. Decrypts each file and verifies content hash against manifest
 6. Writes restored files to output directory
@@ -98,7 +109,7 @@ zk-vault restore ~/.zk-vault/manifests/019533a2-....json -o ./restored
 Verify backup integrity without decrypting.
 
 ```bash
-zk-vault verify <BACKUP>
+zk-vault verify <BACKUP> [--chain <URL>]
 ```
 
 | # | Check | Description |
@@ -113,10 +124,12 @@ zk-vault verify <BACKUP>
 Show vault status: keys, storage config, and recent backups.
 
 ```bash
-zk-vault status
+zk-vault status [--chain <URL>]
 ```
 
 Output: vault path, keystore version, public key fingerprints, S3 config, recent backups (up to 5).
+
+If `--chain`: also shows chain height, file count, validators, and cross-references local manifests with on-chain registration status.
 
 ---
 
@@ -206,6 +219,48 @@ curl -s -X POST localhost:3030/get_file \
 
 Errors: `400` (invalid hex or wrong length), `404` (file not found).
 
+### POST /upload_data (Mode B)
+
+Upload an encrypted data blob to the validator's store.
+
+```bash
+curl -s -X POST localhost:3030/upload_data \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"user-id/file-id","data_b64":"AQIDBA=="}' | jq
+```
+
+```json
+{ "key": "user-id/file-id", "size": 4 }
+```
+
+### POST /download_data (Mode B)
+
+Download an encrypted data blob by key.
+
+```bash
+curl -s -X POST localhost:3030/download_data \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"user-id/file-id"}' | jq
+```
+
+```json
+{ "key": "user-id/file-id", "data_b64": "AQIDBA==", "size": 4 }
+```
+
+Errors: `404` (blob not found).
+
+### GET /list_data (Mode B)
+
+List all stored blobs and total size.
+
+```bash
+curl -s localhost:3030/list_data | jq
+```
+
+```json
+{ "keys": ["user-id/file-a", "user-id/file-b"], "total_size": 2048 }
+```
+
 ### Transaction Types
 
 | Type | Fields | Description |
@@ -267,9 +322,9 @@ cargo build -p zk-vault-cli --release      # release binary
 ### Test
 
 ```bash
-cargo test --workspace                     # all tests (117 total)
+cargo test --workspace                     # all tests (128 total)
 cargo test -p zk-vault-core               # core: 60 tests
-cargo test -p zk-vault-chain              # chain: 57 tests (51 unit + 6 integration)
+cargo test -p zk-vault-chain              # chain: 68 tests (60 unit + 8 integration)
 cargo test -p zk-vault-chain --lib        # chain unit tests only
 cargo test -p zk-vault-chain --test integration  # chain integration tests only
 cargo test -p zk-vault-cli               # CLI tests
@@ -335,7 +390,7 @@ curl -s -X POST localhost:3030/get_file \
   -d '{"merkle_root":"abab..."}' | jq
 ```
 
-### CLI + Chain (E2E)
+### CLI + Chain — Mode B (E2E)
 
 ```bash
 # Terminal 1: Start chain node
@@ -343,15 +398,45 @@ cargo run -p zk-vault-chain --example local_node
 
 # Terminal 2: CLI workflow
 zk-vault init
-zk-vault backup --local ./backups --chain http://localhost:3030 ./my-data
-# → Backup complete. Chain registration: SUCCESS (tx_hash: ...)
 
+# Backup to chain (Mode B: data stored on validators)
+zk-vault backup --chain http://localhost:3030 ./my-data
+# → Backup complete. Chain registration: SUCCESS
+# → Chain upload: 3/3 files uploaded
+
+# Also keep local copy (recommended)
+zk-vault backup --local ./backups --chain http://localhost:3030 ./my-data
+
+# Commit the block
 curl -s -X POST localhost:3030/propose | jq
 # → height: 1, tx_count: 1
 
-zk-vault verify <backup-id>
+# Verify (checks local + chain storage)
+zk-vault verify <backup-id> --chain http://localhost:3030
 # → Verification PASSED (4/4 checks).
 
-zk-vault restore <backup-id> -o ./restored
+# Restore from chain (no local files needed)
+zk-vault restore <backup-id> -o ./restored --chain http://localhost:3030
 # → Restore complete.
+
+# Check chain status
+zk-vault status --chain http://localhost:3030
+# → Chain: height 1, 1 file(s), 3 validators
+```
+
+### CLI + Chain — Mode B curl workflow
+
+```bash
+# Upload blob directly
+curl -s -X POST localhost:3030/upload_data \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"my-blob","data_b64":"AQIDBA=="}' | jq
+
+# Download blob
+curl -s -X POST localhost:3030/download_data \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"my-blob"}' | jq
+
+# List all blobs
+curl -s localhost:3030/list_data | jq
 ```

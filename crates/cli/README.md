@@ -29,7 +29,7 @@ zk-vault status                            # show vault info
 | Flag | Command | Description |
 |---|---|---|
 | `--local <DIR>` | `backup` | Save to local directory (Layer 0) |
-| `--chain <URL>` | `backup` | Register on zk-vault chain RPC |
+| `--chain <URL>` | `backup`, `restore`, `verify`, `status` | Chain node URL (Mode B) |
 | `-o, --output <DIR>` | `restore` | Output directory |
 
 See [docs/CLI.md](../../docs/CLI.md) for full reference (all flags, config setup, chain RPC, E2E examples).

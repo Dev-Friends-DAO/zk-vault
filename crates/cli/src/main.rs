@@ -42,6 +42,9 @@ enum Commands {
         /// Output directory for restored files
         #[arg(short, long, default_value = ".")]
         output: PathBuf,
+        /// Restore from chain node (Mode B) (e.g., --chain http://localhost:3030)
+        #[arg(long)]
+        chain: Option<String>,
     },
     /// Verify backup integrity without decrypting
     Verify {
@@ -78,7 +81,11 @@ async fn main() {
             local,
             chain,
         } => cmd_backup(paths, local, chain).await,
-        Commands::Restore { backup, output } => cmd_restore(backup, output).await,
+        Commands::Restore {
+            backup,
+            output,
+            chain,
+        } => cmd_restore(backup, output, chain).await,
         Commands::Verify { backup, chain } => cmd_verify(backup, chain).await,
         Commands::Status { chain } => cmd_status(chain).await,
     }
@@ -253,9 +260,11 @@ async fn cmd_backup(paths: Vec<PathBuf>, local_dir: Option<PathBuf>, chain_url: 
     let use_s3 = config_path.exists();
     let use_local = local_dir.is_some();
 
-    if !use_s3 && !use_local {
+    let use_chain = chain_url.is_some();
+
+    if !use_s3 && !use_local && !use_chain {
         eprintln!("Error: No storage target specified.");
-        eprintln!("Either create ~/.zk-vault/config.toml for S3, or use --local <dir>.");
+        eprintln!("Either create ~/.zk-vault/config.toml for S3, use --local <dir>, or use --chain <url>.");
         std::process::exit(1);
     }
 
@@ -315,6 +324,9 @@ async fn cmd_backup(paths: Vec<PathBuf>, local_dir: Option<PathBuf>, chain_url: 
     if use_local {
         targets.push("local");
     }
+    if use_chain {
+        targets.push("chain (Mode B)");
+    }
     println!("Storage targets: {}", targets.join(" + "));
 
     // 6. Process each file
@@ -323,6 +335,8 @@ async fn cmd_backup(paths: Vec<PathBuf>, local_dir: Option<PathBuf>, chain_url: 
     let mut leaf_hashes: Vec<[u8; 32]> = Vec::new();
     let mut total_bytes: u64 = 0;
     let mut success_count: usize = 0;
+    // Collect encrypted bundles for chain upload (Mode B)
+    let mut chain_bundles: Vec<(String, Vec<u8>)> = Vec::new();
 
     for file_path in &files {
         let relative_path = file_path.to_string_lossy().to_string();
@@ -411,6 +425,19 @@ async fn cmd_backup(paths: Vec<PathBuf>, local_dir: Option<PathBuf>, chain_url: 
             }
         }
 
+        // Chain storage (Mode B): collect bundles for upload after registration
+        if use_chain {
+            chain_bundles.push((storage_key.clone(), bundle_bytes.clone()));
+            locations.push(StorageLocation {
+                backend: "chain".to_string(),
+                storage_key: storage_key.clone(),
+            });
+            if !file_ok && locations.len() == 1 {
+                // Chain is the only target and no prior failure for other reasons
+                file_ok = true;
+            }
+        }
+
         if file_ok && !locations.is_empty() {
             println!("  Backed up: {relative_path} ({original_size} -> {encrypted_size} bytes)");
             leaf_hashes.push(content_hash);
@@ -462,7 +489,7 @@ async fn cmd_backup(paths: Vec<PathBuf>, local_dir: Option<PathBuf>, chain_url: 
         }
     }
 
-    // 9. Register on chain (if --chain was specified)
+    // 9. Register on chain and upload data (if --chain was specified)
     if let Some(chain_url) = chain_url {
         register_on_chain(
             &chain_url,
@@ -473,6 +500,9 @@ async fn cmd_backup(paths: Vec<PathBuf>, local_dir: Option<PathBuf>, chain_url: 
             &unlocked.ed25519_pk,
         )
         .await;
+
+        // Upload encrypted data to chain validators (Mode B)
+        upload_to_chain(&chain_url, &chain_bundles).await;
     }
 }
 
@@ -536,6 +566,61 @@ async fn register_on_chain(
     }
 }
 
+/// Upload encrypted data bundles to chain validators (Mode B).
+async fn upload_to_chain(chain_url: &str, bundles: &[(String, Vec<u8>)]) {
+    use base64::Engine;
+
+    if bundles.is_empty() {
+        return;
+    }
+
+    println!();
+    println!("Uploading encrypted data to chain (Mode B)...");
+
+    let client = reqwest::Client::new();
+    let base = chain_url.trim_end_matches('/');
+    let mut uploaded = 0usize;
+    let mut failed = 0usize;
+
+    for (key, data) in bundles {
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(data);
+        let body = serde_json::json!({
+            "key": key,
+            "data_b64": data_b64,
+        });
+
+        match client
+            .post(format!("{base}/upload_data"))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                uploaded += 1;
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                eprintln!("  Upload failed for {key}: HTTP {status}");
+                failed += 1;
+            }
+            Err(e) => {
+                eprintln!("  Upload failed for {key}: {e}");
+                failed += 1;
+            }
+        }
+    }
+
+    println!(
+        "  Chain upload: {uploaded}/{} files uploaded",
+        bundles.len()
+    );
+    if failed > 0 {
+        eprintln!(
+            "  Warning: {failed} upload(s) failed. Data is safe locally if --local was used."
+        );
+    }
+}
+
 /// Resolve a backup identifier to a manifest path.
 /// Accepts either a direct file path or a backup UUID (looked up in ~/.zk-vault/manifests/).
 fn resolve_manifest_path(backup: &str) -> PathBuf {
@@ -571,7 +656,7 @@ fn read_local_bundle(path: &str) -> Option<Vec<u8>> {
     }
 }
 
-async fn cmd_restore(backup: String, output: PathBuf) {
+async fn cmd_restore(backup: String, output: PathBuf, chain_url: Option<String>) {
     // 1. Load manifest
     let manifest_path = resolve_manifest_path(&backup);
     let manifest_json = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
@@ -640,7 +725,7 @@ async fn cmd_restore(backup: String, output: PathBuf) {
         let source_path = &file_entry.source_path;
 
         // Try to download the encrypted bundle
-        let bundle_bytes = fetch_bundle(file_entry, &s3_storage).await;
+        let bundle_bytes = fetch_bundle(file_entry, &s3_storage, chain_url.as_deref()).await;
         let bundle_bytes = match bundle_bytes {
             Some(data) => data,
             None => {
@@ -748,6 +833,7 @@ async fn cmd_restore(backup: String, output: PathBuf) {
 async fn fetch_bundle(
     file_entry: &zk_vault_core::manifest::ManifestFileEntry,
     s3_storage: &Option<S3Backend>,
+    chain_url: Option<&str>,
 ) -> Option<Vec<u8>> {
     for location in &file_entry.storage_locations {
         match location.backend.as_str() {
@@ -763,6 +849,13 @@ async fn fetch_bundle(
                     }
                 }
             }
+            "chain" => {
+                if let Some(url) = chain_url {
+                    if let Some(data) = download_from_chain(url, &location.storage_key).await {
+                        return Some(data);
+                    }
+                }
+            }
             other => {
                 eprintln!(
                     "  Warning: Unknown backend '{other}' for {}",
@@ -772,6 +865,32 @@ async fn fetch_bundle(
         }
     }
     None
+}
+
+/// Download an encrypted data blob from a chain node (Mode B).
+async fn download_from_chain(chain_url: &str, key: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+
+    let client = reqwest::Client::new();
+    let base = chain_url.trim_end_matches('/');
+    let body = serde_json::json!({ "key": key });
+
+    match client
+        .post(format!("{base}/download_data"))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let text = resp.text().await.ok()?;
+            let parsed: serde_json::Value = serde_json::from_str(&text).ok()?;
+            let data_b64 = parsed["data_b64"].as_str()?;
+            base64::engine::general_purpose::STANDARD
+                .decode(data_b64)
+                .ok()
+        }
+        _ => None,
+    }
 }
 
 async fn cmd_verify(backup: String, chain_url: Option<String>) {
@@ -827,7 +946,7 @@ async fn cmd_verify(backup: String, chain_url: Option<String>) {
     let mut files_missing = 0u32;
 
     for file_entry in &manifest.files {
-        let found = check_file_exists(file_entry, &s3_storage).await;
+        let found = check_file_exists(file_entry, &s3_storage, chain_url.as_deref()).await;
         if found {
             files_available += 1;
         } else {
@@ -853,7 +972,7 @@ async fn cmd_verify(backup: String, chain_url: Option<String>) {
     let mut hash_skip = 0u32;
 
     for file_entry in &manifest.files {
-        let bundle_bytes = fetch_bundle(file_entry, &s3_storage).await;
+        let bundle_bytes = fetch_bundle(file_entry, &s3_storage, chain_url.as_deref()).await;
         match bundle_bytes {
             Some(data) => {
                 // Verify bundle parses correctly
@@ -997,6 +1116,7 @@ async fn attest_on_chain(chain_url: &str, merkle_root: [u8; 32]) {
 async fn check_file_exists(
     file_entry: &zk_vault_core::manifest::ManifestFileEntry,
     s3_storage: &Option<S3Backend>,
+    chain_url: Option<&str>,
 ) -> bool {
     for location in &file_entry.storage_locations {
         match location.backend.as_str() {
@@ -1008,6 +1128,16 @@ async fn check_file_exists(
             "s3" => {
                 if let Some(s3) = s3_storage {
                     if let Ok(true) = s3.exists(&location.storage_key).await {
+                        return true;
+                    }
+                }
+            }
+            "chain" => {
+                if let Some(url) = chain_url {
+                    if download_from_chain(url, &location.storage_key)
+                        .await
+                        .is_some()
+                    {
                         return true;
                     }
                 }
