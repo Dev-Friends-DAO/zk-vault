@@ -29,6 +29,32 @@ zk-vault-chain/
 | `blob_store` | In-memory encrypted data store for Mode B (validators store blobs directly) |
 | `rpc` | HTTP JSON-RPC server with `Arc<Mutex<Node>>` shared state |
 
+## Transaction Lifecycle
+
+```
+Client TX
+   │
+   ▼
+Mempool (in-memory BTreeMap)
+   │  pre-validate: signature check, dedup, capacity
+   ▼
+on_propose() ── BlockBuilder reaps txs, trial-applies, computes state_root
+   │
+   ▼
+Consensus (Malachite BFT, 2/3+ quorum)
+   │
+   ▼
+on_decided() ── apply_block()
+   │  ├─ ChainState 更新 (file/guardian/recovery/key registries)
+   │  ├─ storage.save_chain_state() → RocksDB 永続化
+   │  └─ Mempool purge + revalidate
+   ▼
+Block committed
+```
+
+On restart, `load_chain_state()` reconstructs `ChainState` from RocksDB.
+Mempool is ephemeral — uncommitted transactions are lost on restart.
+
 ## Quick Start
 
 ```bash
@@ -73,7 +99,7 @@ See [docs/CLI.md](../../docs/CLI.md) for full RPC reference (request/response ex
 ## Tests
 
 ```bash
-cargo test -p zk-vault-chain              # all (76 tests)
+cargo test -p zk-vault-chain              # all (81 tests)
 cargo test -p zk-vault-chain --lib        # unit tests only (67)
 cargo test -p zk-vault-chain --test integration  # integration only (9)
 ```

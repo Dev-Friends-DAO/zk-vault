@@ -262,7 +262,7 @@ zk-vault/
 
 ```bash
 cargo build --workspace          # build all crates
-cargo test --workspace           # all tests (157 total)
+cargo test --workspace           # all tests (162 total)
 cargo clippy --workspace -- -D warnings
 cargo fmt
 ```

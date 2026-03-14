@@ -600,9 +600,9 @@ cargo build -p zk-vault-cli --release      # release binary
 ### Test
 
 ```bash
-cargo test --workspace                     # all tests (157 total)
+cargo test --workspace                     # all tests (162 total)
 cargo test -p zk-vault-core               # core: 81 tests
-cargo test -p zk-vault-chain              # chain: 76 tests (67 unit + 9 integration)
+cargo test -p zk-vault-chain              # chain: 81 tests (72 unit + 9 integration)
 cargo test -p zk-vault-chain --lib        # chain unit tests only
 cargo test -p zk-vault-chain --test integration  # chain integration tests only
 cargo test -p zk-vault-cli               # CLI tests
