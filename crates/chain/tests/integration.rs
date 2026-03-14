@@ -9,6 +9,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use zk_vault_chain::mempool::MempoolConfig;
 use zk_vault_chain::node::{Node, NodeConfig};
 use zk_vault_chain::rpc::{self, SharedNode, StatusResponse, SubmitTxRequest, SubmitTxResponse};
+use zk_vault_chain::storage::Storage;
 use zk_vault_chain::types::{Address, Transaction, Validator, ValidatorSet};
 
 // ── Helpers ──
@@ -36,6 +37,8 @@ struct TestNetwork {
     nodes: Vec<SharedNode>,
     urls: Vec<String>,
     keys: Vec<(SigningKey, [u8; 32])>,
+    /// Keep temp directories alive for the lifetime of the network.
+    _dirs: Vec<tempfile::TempDir>,
 }
 
 impl TestNetwork {
@@ -49,6 +52,7 @@ impl TestNetwork {
 
         let mut nodes = Vec::new();
         let mut urls = Vec::new();
+        let mut dirs = Vec::new();
 
         for (_, pk) in &keys {
             let config = NodeConfig {
@@ -56,7 +60,9 @@ impl TestNetwork {
                 validator_pk: *pk,
                 mempool_config: MempoolConfig::default(),
             };
-            let node = Arc::new(Mutex::new(Node::new(vs.clone(), config)));
+            let dir = tempfile::tempdir().unwrap();
+            let storage = Arc::new(Storage::open(dir.path()).unwrap());
+            let node = Arc::new(Mutex::new(Node::new(vs.clone(), config, storage)));
             let app = rpc::router(node.clone());
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
@@ -65,9 +71,15 @@ impl TestNetwork {
             });
             nodes.push(node);
             urls.push(format!("http://{addr}"));
+            dirs.push(dir);
         }
 
-        Self { nodes, urls, keys }
+        Self {
+            nodes,
+            urls,
+            keys,
+            _dirs: dirs,
+        }
     }
 
     /// Propose on the first node and broadcast the decided block to all nodes.

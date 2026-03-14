@@ -5,11 +5,14 @@
 //! from external clients (submit_tx, query), coordinating state transitions
 //! and mempool management.
 
+use std::sync::Arc;
+
 use tracing::info;
 
 use crate::blob_store::BlobStore;
 use crate::mempool::{BlockBuilder, Mempool, MempoolConfig, MempoolError};
 use crate::state::ChainState;
+use crate::storage::Storage;
 use crate::types::{Address, Block, BlockId, Height, Transaction, ValidatorSet};
 
 // ── Errors ──
@@ -47,7 +50,6 @@ pub struct NodeConfig {
 // ── Node ──
 
 /// The chain node: coordinates consensus events with state and mempool.
-#[derive(Debug)]
 pub struct Node {
     /// Current chain state.
     state: ChainState,
@@ -59,33 +61,59 @@ pub struct Node {
     blocks_committed: u64,
     /// Encrypted data blob store (Mode B).
     blob_store: BlobStore,
+    /// RocksDB persistence layer.
+    storage: Arc<Storage>,
+}
+
+impl std::fmt::Debug for Node {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Node")
+            .field("height", &self.state.height)
+            .field("blocks_committed", &self.blocks_committed)
+            .field("config", &self.config)
+            .finish()
+    }
 }
 
 impl Node {
     /// Create a new node from a genesis validator set.
-    pub fn new(validator_set: ValidatorSet, config: NodeConfig) -> Self {
+    pub fn new(validator_set: ValidatorSet, config: NodeConfig, storage: Arc<Storage>) -> Self {
         let state = ChainState::genesis(validator_set);
         let mempool = Mempool::new(config.mempool_config.clone());
+        let blob_store = BlobStore::new(Arc::clone(&storage));
         Self {
             state,
             mempool,
             config,
             blocks_committed: 0,
-            blob_store: BlobStore::new(),
+            blob_store,
+            storage,
         }
     }
 
     /// Create a node from an existing state (e.g., loaded from disk).
-    pub fn from_state(state: ChainState, config: NodeConfig) -> Self {
+    pub fn from_state(state: ChainState, config: NodeConfig, storage: Arc<Storage>) -> Self {
         let mempool = Mempool::new(config.mempool_config.clone());
         let blocks_committed = state.height.0;
+        let blob_store = BlobStore::new(Arc::clone(&storage));
         Self {
             state,
             mempool,
             config,
             blocks_committed,
-            blob_store: BlobStore::new(),
+            blob_store,
+            storage,
         }
+    }
+
+    /// Create a node by loading persisted state from storage.
+    /// Panics if no chain state is found in the database.
+    pub fn from_storage(config: NodeConfig, storage: Arc<Storage>) -> Self {
+        let state = storage
+            .load_chain_state()
+            .expect("Failed to load chain state")
+            .expect("No chain state found in storage");
+        Self::from_state(state, config, storage)
     }
 
     // ── Accessors ──
@@ -174,6 +202,11 @@ impl Node {
 
         self.blocks_committed += 1;
 
+        // Persist state to RocksDB
+        self.storage
+            .save_chain_state(&self.state)
+            .expect("Failed to persist chain state");
+
         info!(
             height = height.0,
             tx_count,
@@ -225,12 +258,12 @@ impl Node {
     }
 
     /// Retrieve an encrypted data blob by key.
-    pub fn get_blob(&self, key: &str) -> Option<&[u8]> {
+    pub fn get_blob(&self, key: &str) -> Option<Vec<u8>> {
         self.blob_store.get(key)
     }
 
     /// List all blob keys stored on this node.
-    pub fn list_blobs(&self) -> Vec<&str> {
+    pub fn list_blobs(&self) -> Vec<String> {
         self.blob_store.keys()
     }
 
@@ -289,7 +322,13 @@ mod tests {
         (sk, pk)
     }
 
-    fn test_setup() -> (Node, Vec<(SigningKey, [u8; 32])>) {
+    fn test_storage() -> (Arc<Storage>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(dir.path()).unwrap());
+        (storage, dir)
+    }
+
+    fn test_setup() -> (Node, Vec<(SigningKey, [u8; 32])>, tempfile::TempDir) {
         let keys: Vec<_> = (1..=3).map(make_keypair).collect();
         let validators: Vec<Validator> = keys
             .iter()
@@ -303,7 +342,8 @@ mod tests {
             mempool_config: MempoolConfig::default(),
         };
 
-        (Node::new(vs, config), keys)
+        let (storage, dir) = test_storage();
+        (Node::new(vs, config, storage), keys, dir)
     }
 
     fn make_register_tx(sk: &SigningKey, pk: &[u8; 32], merkle_root: [u8; 32]) -> Transaction {
@@ -319,7 +359,7 @@ mod tests {
 
     #[test]
     fn new_node_at_genesis() {
-        let (node, _) = test_setup();
+        let (node, _, _dir) = test_setup();
         assert_eq!(node.height(), Height::GENESIS);
         assert_eq!(node.pending_tx_count(), 0);
         assert_eq!(node.blocks_committed(), 0);
@@ -331,7 +371,7 @@ mod tests {
 
     #[test]
     fn submit_tx_adds_to_mempool() {
-        let (mut node, keys) = test_setup();
+        let (mut node, keys, _dir) = test_setup();
         let (sk, pk) = &keys[0];
         let tx = make_register_tx(sk, pk, [0xAA; 32]);
 
@@ -342,7 +382,7 @@ mod tests {
 
     #[test]
     fn propose_builds_block() {
-        let (mut node, keys) = test_setup();
+        let (mut node, keys, _dir) = test_setup();
         let (sk, pk) = &keys[0];
 
         node.submit_tx(make_register_tx(sk, pk, [0x10; 32]))
@@ -357,7 +397,7 @@ mod tests {
 
     #[test]
     fn decide_applies_block() {
-        let (mut node, keys) = test_setup();
+        let (mut node, keys, _dir) = test_setup();
         let (sk, pk) = &keys[0];
 
         node.submit_tx(make_register_tx(sk, pk, [0x10; 32]))
@@ -377,7 +417,7 @@ mod tests {
 
     #[test]
     fn decide_wrong_height_fails() {
-        let (mut node, keys) = test_setup();
+        let (mut node, keys, _dir) = test_setup();
         let (sk, pk) = &keys[0];
 
         // Submit and commit one block first
@@ -405,7 +445,7 @@ mod tests {
 
     #[test]
     fn multiple_blocks_lifecycle() {
-        let (mut node, keys) = test_setup();
+        let (mut node, keys, _dir) = test_setup();
         let (sk, pk) = &keys[0];
 
         for i in 0..5u8 {
@@ -424,7 +464,7 @@ mod tests {
 
     #[test]
     fn query_file_after_commit() {
-        let (mut node, keys) = test_setup();
+        let (mut node, keys, _dir) = test_setup();
         let (sk, pk) = &keys[0];
         let merkle_root = [0xAB; 32];
 
@@ -440,7 +480,7 @@ mod tests {
 
     #[test]
     fn mempool_purged_after_decide() {
-        let (mut node, keys) = test_setup();
+        let (mut node, keys, _dir) = test_setup();
         let (sk, pk) = &keys[0];
 
         // Submit 3 txs
@@ -449,7 +489,7 @@ mod tests {
         node.submit_tx(make_register_tx(sk, pk, [3; 32])).unwrap();
         assert_eq!(node.pending_tx_count(), 3);
 
-        // Propose and decide — all 3 should be included
+        // Propose and decide -- all 3 should be included
         let block = node.on_propose(0);
         assert_eq!(block.transactions.len(), 3);
         node.on_decided(block).unwrap();
@@ -459,7 +499,7 @@ mod tests {
 
     #[test]
     fn stale_tx_evicted_after_decide() {
-        let (mut node, keys) = test_setup();
+        let (mut node, keys, _dir) = test_setup();
         let (sk, pk) = &keys[0];
         let merkle_root = [0xDD; 32];
 
@@ -468,7 +508,6 @@ mod tests {
             .unwrap();
 
         // Simulate: someone else's block registers the same merkle_root
-        // We manually build and apply a block containing the same tx
         let external_block = Block {
             header: BlockHeader {
                 height: Height(1),
@@ -489,7 +528,7 @@ mod tests {
 
     #[test]
     fn from_state_restores() {
-        let (mut node, keys) = test_setup();
+        let (mut node, keys, _dir) = test_setup();
         let (sk, pk) = &keys[0];
 
         // Commit some blocks
@@ -503,12 +542,13 @@ mod tests {
 
         // "Restart" from saved state
         let saved_state = node.state().clone();
+        let (storage, _dir2) = test_storage();
         let config = NodeConfig {
             validator_address: Address::from_public_key(pk),
             validator_pk: *pk,
             mempool_config: MempoolConfig::default(),
         };
-        let restored = Node::from_state(saved_state, config);
+        let restored = Node::from_state(saved_state, config, storage);
 
         assert_eq!(restored.height(), Height(3));
         assert_eq!(restored.state().file_count(), 3);
@@ -518,7 +558,7 @@ mod tests {
 
     #[test]
     fn status_reflects_state() {
-        let (mut node, keys) = test_setup();
+        let (mut node, keys, _dir) = test_setup();
         let (sk, pk) = &keys[0];
 
         let status_before = node.status();

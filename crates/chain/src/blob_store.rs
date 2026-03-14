@@ -1,80 +1,113 @@
-//! In-memory blob store for Mode B (native validator storage).
+//! Persistent blob store for Mode B (native validator storage).
 //!
-//! Stores encrypted data blobs keyed by storage key. In Phase H this
-//! will be backed by redb for persistence across restarts.
+//! Backed by RocksDB via the shared Storage layer.
 
-use std::collections::HashMap;
+use std::sync::Arc;
 
-/// In-memory blob store for encrypted backup data.
-#[derive(Debug, Clone, Default)]
+use crate::storage::Storage;
+
+/// RocksDB-backed blob store for encrypted backup data.
 pub struct BlobStore {
-    /// Storage key → encrypted data.
-    blobs: HashMap<String, Vec<u8>>,
+    storage: Arc<Storage>,
+}
+
+impl std::fmt::Debug for BlobStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlobStore").finish()
+    }
 }
 
 impl BlobStore {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(storage: Arc<Storage>) -> Self {
+        Self { storage }
     }
 
     /// Store a blob. Overwrites if key already exists.
-    pub fn put(&mut self, key: String, data: Vec<u8>) -> usize {
+    pub fn put(&self, key: String, data: Vec<u8>) -> usize {
         let size = data.len();
-        self.blobs.insert(key, data);
+        self.storage
+            .put_blob(&key, &data)
+            .expect("BlobStore put failed");
         size
     }
 
     /// Retrieve a blob by key.
-    pub fn get(&self, key: &str) -> Option<&[u8]> {
-        self.blobs.get(key).map(|v| v.as_slice())
+    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
+        self.storage.get_blob(key).expect("BlobStore get failed")
     }
 
     /// Check if a blob exists.
     pub fn exists(&self, key: &str) -> bool {
-        self.blobs.contains_key(key)
+        self.storage
+            .get_blob(key)
+            .expect("BlobStore exists failed")
+            .is_some()
     }
 
     /// Delete a blob. Returns true if it existed.
-    pub fn delete(&mut self, key: &str) -> bool {
-        self.blobs.remove(key).is_some()
+    pub fn delete(&self, key: &str) -> bool {
+        let existed = self.exists(key);
+        if existed {
+            self.storage
+                .delete_blob(key)
+                .expect("BlobStore delete failed");
+        }
+        existed
     }
 
     /// Number of stored blobs.
     pub fn len(&self) -> usize {
-        self.blobs.len()
+        let (count, _) = self
+            .storage
+            .blob_count_and_size()
+            .expect("BlobStore count failed");
+        count
     }
 
     /// Whether the store is empty.
     pub fn is_empty(&self) -> bool {
-        self.blobs.is_empty()
+        self.len() == 0
     }
 
     /// Total bytes stored.
     pub fn total_size(&self) -> u64 {
-        self.blobs.values().map(|v| v.len() as u64).sum()
+        let (_, size) = self
+            .storage
+            .blob_count_and_size()
+            .expect("BlobStore size failed");
+        size
     }
 
     /// List all keys.
-    pub fn keys(&self) -> Vec<&str> {
-        self.blobs.keys().map(|k| k.as_str()).collect()
+    pub fn keys(&self) -> Vec<String> {
+        self.storage
+            .list_blob_keys()
+            .expect("BlobStore keys failed")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::Storage;
+
+    fn test_store() -> (BlobStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(dir.path()).unwrap());
+        (BlobStore::new(storage), dir)
+    }
 
     #[test]
     fn put_and_get() {
-        let mut store = BlobStore::new();
+        let (store, _dir) = test_store();
         store.put("key1".to_string(), vec![1, 2, 3]);
-        assert_eq!(store.get("key1"), Some([1, 2, 3].as_slice()));
+        assert_eq!(store.get("key1"), Some(vec![1, 2, 3]));
         assert_eq!(store.get("key2"), None);
     }
 
     #[test]
     fn exists_and_delete() {
-        let mut store = BlobStore::new();
+        let (store, _dir) = test_store();
         store.put("key1".to_string(), vec![1]);
         assert!(store.exists("key1"));
         assert!(!store.exists("key2"));
@@ -86,7 +119,7 @@ mod tests {
 
     #[test]
     fn len_and_total_size() {
-        let mut store = BlobStore::new();
+        let (store, _dir) = test_store();
         assert!(store.is_empty());
 
         store.put("a".to_string(), vec![0; 100]);
@@ -98,16 +131,16 @@ mod tests {
 
     #[test]
     fn overwrite() {
-        let mut store = BlobStore::new();
+        let (store, _dir) = test_store();
         store.put("key".to_string(), vec![1, 2, 3]);
         store.put("key".to_string(), vec![4, 5]);
-        assert_eq!(store.get("key"), Some([4, 5].as_slice()));
+        assert_eq!(store.get("key"), Some(vec![4, 5]));
         assert_eq!(store.len(), 1);
     }
 
     #[test]
     fn keys_list() {
-        let mut store = BlobStore::new();
+        let (store, _dir) = test_store();
         store.put("b".to_string(), vec![1]);
         store.put("a".to_string(), vec![2]);
         let mut keys = store.keys();

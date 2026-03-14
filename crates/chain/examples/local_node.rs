@@ -15,6 +15,7 @@ use ed25519_dalek::SigningKey;
 use zk_vault_chain::mempool::MempoolConfig;
 use zk_vault_chain::node::{Node, NodeConfig};
 use zk_vault_chain::rpc;
+use zk_vault_chain::storage::Storage;
 use zk_vault_chain::types::{Address, Validator, ValidatorSet};
 
 #[tokio::main]
@@ -45,7 +46,9 @@ async fn main() {
         mempool_config: MempoolConfig::default(),
     };
 
-    let node = Arc::new(Mutex::new(Node::new(vs, config)));
+    let data_dir = std::env::current_dir().unwrap().join(".zk-vault-data");
+    let storage = Arc::new(Storage::open(&data_dir).expect("Failed to open RocksDB"));
+    let node = Arc::new(Mutex::new(Node::new(vs, config, storage)));
     let addr = "127.0.0.1:3030";
 
     // Print example transaction for copy-paste
@@ -66,7 +69,8 @@ async fn main() {
     println!("  zk-vault chain node (local dev mode)");
     println!("========================================");
     println!();
-    println!("RPC: http://{addr}");
+    println!("Data: {}", data_dir.display());
+    println!("RPC:  http://{addr}");
     println!();
     println!("--- Try these commands ---");
     println!();

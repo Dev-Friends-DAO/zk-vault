@@ -374,8 +374,8 @@ async fn handle_download_data(
         )
     })?;
 
-    let data_b64 = base64::engine::general_purpose::STANDARD.encode(data);
     let size = data.len();
+    let data_b64 = base64::engine::general_purpose::STANDARD.encode(&data);
 
     Ok(Json(DownloadDataResponse {
         key: req.key,
@@ -552,7 +552,7 @@ async fn handle_get_key_status(
 
 async fn handle_list_data(State(node): State<SharedNode>) -> Json<ListDataResponse> {
     let node = node.lock().unwrap();
-    let keys: Vec<String> = node.list_blobs().into_iter().map(String::from).collect();
+    let keys = node.list_blobs();
     let total_size = node.blob_store_size();
     Json(ListDataResponse { keys, total_size })
 }
@@ -573,7 +573,7 @@ mod tests {
         (sk, pk)
     }
 
-    fn test_node() -> (SharedNode, Vec<(SigningKey, [u8; 32])>) {
+    fn test_node() -> (SharedNode, Vec<(SigningKey, [u8; 32])>, tempfile::TempDir) {
         let keys: Vec<_> = (1..=3).map(make_keypair).collect();
         let validators: Vec<Validator> = keys
             .iter()
@@ -587,8 +587,10 @@ mod tests {
             mempool_config: MempoolConfig::default(),
         };
 
-        let node = Arc::new(Mutex::new(Node::new(vs, config)));
-        (node, keys)
+        let dir = tempfile::tempdir().unwrap();
+        let storage = std::sync::Arc::new(crate::storage::Storage::open(dir.path()).unwrap());
+        let node = Arc::new(Mutex::new(Node::new(vs, config, storage)));
+        (node, keys, dir)
     }
 
     fn make_register_tx(sk: &SigningKey, pk: &[u8; 32], merkle_root: [u8; 32]) -> Transaction {
@@ -603,20 +605,26 @@ mod tests {
     }
 
     /// Spawn a test server and return its base URL.
-    async fn spawn_test_server() -> (String, SharedNode, Vec<(SigningKey, [u8; 32])>) {
-        let (node, keys) = test_node();
+    /// The TempDir must be kept alive for the lifetime of the test.
+    async fn spawn_test_server() -> (
+        String,
+        SharedNode,
+        Vec<(SigningKey, [u8; 32])>,
+        tempfile::TempDir,
+    ) {
+        let (node, keys, dir) = test_node();
         let app = router(node.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        (format!("http://{addr}"), node, keys)
+        (format!("http://{addr}"), node, keys, dir)
     }
 
     #[tokio::test]
     async fn health_check() {
-        let (base, _, _) = spawn_test_server().await;
+        let (base, _, _, _dir) = spawn_test_server().await;
         let resp = reqwest::get(format!("{base}/health")).await.unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(resp.text().await.unwrap(), "ok");
@@ -624,7 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_at_genesis() {
-        let (base, _, _) = spawn_test_server().await;
+        let (base, _, _, _dir) = spawn_test_server().await;
         let resp = reqwest::get(format!("{base}/status")).await.unwrap();
         assert_eq!(resp.status(), 200);
 
@@ -637,7 +645,7 @@ mod tests {
 
     #[tokio::test]
     async fn submit_tx_and_propose() {
-        let (base, _, keys) = spawn_test_server().await;
+        let (base, _, keys, _dir) = spawn_test_server().await;
         let client = reqwest::Client::new();
 
         // Submit a tx
@@ -686,7 +694,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_file_after_commit() {
-        let (base, _, keys) = spawn_test_server().await;
+        let (base, _, keys, _dir) = spawn_test_server().await;
         let client = reqwest::Client::new();
 
         let (sk, pk) = &keys[0];
@@ -722,7 +730,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_file_not_found() {
-        let (base, _, _) = spawn_test_server().await;
+        let (base, _, _, _dir) = spawn_test_server().await;
         let client = reqwest::Client::new();
 
         let resp = client
@@ -738,7 +746,7 @@ mod tests {
 
     #[tokio::test]
     async fn submit_invalid_tx_rejected() {
-        let (base, _, _) = spawn_test_server().await;
+        let (base, _, _, _dir) = spawn_test_server().await;
         let client = reqwest::Client::new();
 
         // Bad JSON
@@ -755,7 +763,7 @@ mod tests {
 
     #[tokio::test]
     async fn submit_bad_signature_rejected() {
-        let (base, _, _) = spawn_test_server().await;
+        let (base, _, _, _dir) = spawn_test_server().await;
         let client = reqwest::Client::new();
 
         let tx = Transaction::RegisterFile {
@@ -778,7 +786,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_lifecycle() {
-        let (base, _, keys) = spawn_test_server().await;
+        let (base, _, keys, _dir) = spawn_test_server().await;
         let client = reqwest::Client::new();
         let (sk, pk) = &keys[0];
 
@@ -822,7 +830,7 @@ mod tests {
     #[tokio::test]
     async fn upload_and_download_blob() {
         use base64::Engine;
-        let (base, _, _) = spawn_test_server().await;
+        let (base, _, _, _dir) = spawn_test_server().await;
         let client = reqwest::Client::new();
 
         let data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03];
@@ -864,7 +872,7 @@ mod tests {
 
     #[tokio::test]
     async fn download_blob_not_found() {
-        let (base, _, _) = spawn_test_server().await;
+        let (base, _, _, _dir) = spawn_test_server().await;
         let client = reqwest::Client::new();
 
         let resp = client
@@ -881,7 +889,7 @@ mod tests {
     #[tokio::test]
     async fn list_data_empty_then_populated() {
         use base64::Engine;
-        let (base, _, _) = spawn_test_server().await;
+        let (base, _, _, _dir) = spawn_test_server().await;
         let client = reqwest::Client::new();
 
         // Empty
@@ -925,7 +933,7 @@ mod tests {
 
     #[tokio::test]
     async fn upload_invalid_base64_rejected() {
-        let (base, _, _) = spawn_test_server().await;
+        let (base, _, _, _dir) = spawn_test_server().await;
         let client = reqwest::Client::new();
 
         let resp = client
@@ -944,7 +952,7 @@ mod tests {
 
     #[tokio::test]
     async fn anchor_status_empty() {
-        let (base, _, _) = spawn_test_server().await;
+        let (base, _, _, _dir) = spawn_test_server().await;
         let client = reqwest::Client::new();
 
         let resp: AnchorStatusResponse = client
@@ -962,7 +970,7 @@ mod tests {
 
     #[tokio::test]
     async fn anchor_status_with_files() {
-        let (base, _, keys) = spawn_test_server().await;
+        let (base, _, keys, _dir) = spawn_test_server().await;
         let client = reqwest::Client::new();
         let (sk, pk) = &keys[0];
 
