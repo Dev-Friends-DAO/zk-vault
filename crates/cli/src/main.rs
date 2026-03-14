@@ -33,6 +33,9 @@ enum Commands {
         /// Register backup on zk-vault chain (e.g., --chain http://localhost:3030)
         #[arg(long)]
         chain: Option<String>,
+        /// Anchor Merkle root to configured blockchains after backup
+        #[arg(long)]
+        anchor: bool,
     },
     /// Restore files from a backup
     Restore {
@@ -61,6 +64,18 @@ enum Commands {
         #[arg(long)]
         chain: Option<String>,
     },
+    /// Anchor a backup's Merkle root to Bitcoin and/or Ethereum
+    Anchor {
+        /// Backup ID or path to manifest file
+        #[arg()]
+        backup: String,
+        /// Anchor to Bitcoin (OP_RETURN)
+        #[arg(long)]
+        btc: bool,
+        /// Anchor to Ethereum (calldata)
+        #[arg(long)]
+        eth: bool,
+    },
 }
 
 #[tokio::main]
@@ -80,7 +95,8 @@ async fn main() {
             paths,
             local,
             chain,
-        } => cmd_backup(paths, local, chain).await,
+            anchor,
+        } => cmd_backup(paths, local, chain, anchor).await,
         Commands::Restore {
             backup,
             output,
@@ -88,6 +104,7 @@ async fn main() {
         } => cmd_restore(backup, output, chain).await,
         Commands::Verify { backup, chain } => cmd_verify(backup, chain).await,
         Commands::Status { chain } => cmd_status(chain).await,
+        Commands::Anchor { backup, btc, eth } => cmd_anchor(backup, btc, eth).await,
     }
 }
 
@@ -254,7 +271,12 @@ fn save_manifest(manifest: &zk_vault_core::manifest::BackupManifest) -> std::io:
     Ok(path)
 }
 
-async fn cmd_backup(paths: Vec<PathBuf>, local_dir: Option<PathBuf>, chain_url: Option<String>) {
+async fn cmd_backup(
+    paths: Vec<PathBuf>,
+    local_dir: Option<PathBuf>,
+    chain_url: Option<String>,
+    anchor: bool,
+) {
     // 1. Determine storage targets
     let config_path = keys::vault_dir().join("config.toml");
     let use_s3 = config_path.exists();
@@ -503,6 +525,102 @@ async fn cmd_backup(paths: Vec<PathBuf>, local_dir: Option<PathBuf>, chain_url: 
 
         // Upload encrypted data to chain validators (Mode B)
         upload_to_chain(&chain_url, &chain_bundles).await;
+    }
+
+    // 10. Anchor to blockchains (if --anchor was specified)
+    if anchor {
+        anchor_merkle_root(merkle_root).await;
+    }
+}
+
+/// Anchor a Merkle root to all configured blockchains.
+async fn anchor_merkle_root(merkle_root: [u8; 32]) {
+    use zk_vault_core::anchor::bitcoin::{BitcoinAnchor, BitcoinConfig};
+    use zk_vault_core::anchor::ethereum::{EthereumAnchor, EthereumConfig};
+    use zk_vault_core::anchor::BlockchainAnchor;
+
+    let anchor_config = match load_anchor_config() {
+        Some(c) => c,
+        None => {
+            eprintln!();
+            eprintln!("Anchoring skipped: no [anchor] section in config.toml");
+            return;
+        }
+    };
+
+    println!();
+    println!("Anchoring Merkle root to blockchains...");
+
+    let mut success = 0usize;
+    let mut total = 0usize;
+
+    // Bitcoin
+    if let Some(btc) = anchor_config.get("bitcoin") {
+        let api_url = btc.get("api_url").and_then(|v| v.as_str()).unwrap_or("");
+        let network = btc
+            .get("network")
+            .and_then(|v| v.as_str())
+            .unwrap_or("testnet");
+        let wif = btc
+            .get("wif_private_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if !wif.is_empty() {
+            total += 1;
+            let anchor = BitcoinAnchor::new(BitcoinConfig {
+                api_url: api_url.to_string(),
+                network: network.to_string(),
+                wif_private_key: wif.to_string(),
+            });
+            match anchor.anchor(&merkle_root).await {
+                Ok(receipt) => {
+                    println!("  Bitcoin ({network}): SUCCESS (tx: {})", receipt.tx_id);
+                    success += 1;
+                }
+                Err(e) => eprintln!("  Bitcoin ({network}): FAILED ({e})"),
+            }
+        }
+    }
+
+    // Ethereum
+    if let Some(eth) = anchor_config.get("ethereum") {
+        let rpc_url = eth.get("rpc_url").and_then(|v| v.as_str()).unwrap_or("");
+        let network = eth
+            .get("network")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sepolia");
+        let pk_hex = eth
+            .get("private_key_hex")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let chain_id = eth
+            .get("chain_id")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(11155111) as u64;
+
+        if !pk_hex.is_empty() {
+            total += 1;
+            let anchor = EthereumAnchor::new(EthereumConfig {
+                rpc_url: rpc_url.to_string(),
+                network: network.to_string(),
+                private_key_hex: pk_hex.to_string(),
+                chain_id,
+            });
+            match anchor.anchor(&merkle_root).await {
+                Ok(receipt) => {
+                    println!("  Ethereum ({network}): SUCCESS (tx: {})", receipt.tx_id);
+                    success += 1;
+                }
+                Err(e) => eprintln!("  Ethereum ({network}): FAILED ({e})"),
+            }
+        }
+    }
+
+    if total == 0 {
+        eprintln!("  No anchor keys configured. Add keys to [anchor.*] in config.toml.");
+    } else {
+        println!("  Anchoring: {success}/{total} succeeded.");
     }
 }
 
@@ -1354,6 +1472,185 @@ async fn query_chain_status(chain_url: &str) {
             }
         }
     }
+}
+
+/// Load anchoring config from ~/.zk-vault/config.toml.
+fn load_anchor_config() -> Option<toml::Value> {
+    let config_path = keys::vault_dir().join("config.toml");
+    if !config_path.exists() {
+        return None;
+    }
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let config: toml::Value = toml::from_str(&content).ok()?;
+    config.get("anchor").cloned()
+}
+
+async fn cmd_anchor(backup: String, use_btc: bool, use_eth: bool) {
+    use zk_vault_core::anchor::bitcoin::{BitcoinAnchor, BitcoinConfig};
+    use zk_vault_core::anchor::ethereum::{EthereumAnchor, EthereumConfig};
+    use zk_vault_core::anchor::BlockchainAnchor;
+
+    if !use_btc && !use_eth {
+        eprintln!("Error: Specify at least one anchor target: --btc and/or --eth");
+        std::process::exit(1);
+    }
+
+    // 1. Load manifest
+    let manifest_path = resolve_manifest_path(&backup);
+    let manifest_json = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
+        eprintln!("Error reading manifest: {e}");
+        std::process::exit(1);
+    });
+    let manifest: zk_vault_core::manifest::BackupManifest = serde_json::from_str(&manifest_json)
+        .unwrap_or_else(|e| {
+            eprintln!("Error parsing manifest: {e}");
+            std::process::exit(1);
+        });
+
+    let merkle_root = manifest.merkle_root;
+    println!("Anchoring backup: {}", manifest.backup_id);
+    println!("  Merkle root: {}", hex::encode(merkle_root));
+    println!();
+
+    // 2. Load anchor config
+    let anchor_config = load_anchor_config().unwrap_or_else(|| {
+        eprintln!("Error: No [anchor] section in ~/.zk-vault/config.toml");
+        eprintln!("Add [anchor.bitcoin] and/or [anchor.ethereum] sections.");
+        std::process::exit(1);
+    });
+
+    let mut receipts: Vec<zk_vault_core::anchor::AnchorReceipt> = Vec::new();
+
+    // 3. Bitcoin anchoring
+    if use_btc {
+        let btc_config = anchor_config.get("bitcoin").unwrap_or_else(|| {
+            eprintln!("Error: [anchor.bitcoin] section missing in config.toml");
+            std::process::exit(1);
+        });
+
+        let api_url = btc_config
+            .get("api_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| {
+                eprintln!("Error: anchor.bitcoin.api_url is required");
+                std::process::exit(1);
+            });
+        let network = btc_config
+            .get("network")
+            .and_then(|v| v.as_str())
+            .unwrap_or("testnet");
+        let wif = btc_config
+            .get("wif_private_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| {
+                eprintln!("Error: anchor.bitcoin.wif_private_key is required");
+                std::process::exit(1);
+            });
+
+        if wif.is_empty() {
+            eprintln!("Error: anchor.bitcoin.wif_private_key is empty");
+            std::process::exit(1);
+        }
+
+        println!("Anchoring to Bitcoin ({network})...");
+        let btc = BitcoinAnchor::new(BitcoinConfig {
+            api_url: api_url.to_string(),
+            network: network.to_string(),
+            wif_private_key: wif.to_string(),
+        });
+
+        match btc.anchor(&merkle_root).await {
+            Ok(receipt) => {
+                println!("  Bitcoin anchor: SUCCESS");
+                println!("  tx_id: {}", receipt.tx_id);
+                if let Some(fee) = &receipt.fee {
+                    println!("  fee: {fee}");
+                }
+                receipts.push(receipt);
+            }
+            Err(e) => {
+                eprintln!("  Bitcoin anchor: FAILED ({e})");
+            }
+        }
+    }
+
+    // 4. Ethereum anchoring
+    if use_eth {
+        let eth_config = anchor_config.get("ethereum").unwrap_or_else(|| {
+            eprintln!("Error: [anchor.ethereum] section missing in config.toml");
+            std::process::exit(1);
+        });
+
+        let rpc_url = eth_config
+            .get("rpc_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| {
+                eprintln!("Error: anchor.ethereum.rpc_url is required");
+                std::process::exit(1);
+            });
+        let network = eth_config
+            .get("network")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sepolia");
+        let pk_hex = eth_config
+            .get("private_key_hex")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| {
+                eprintln!("Error: anchor.ethereum.private_key_hex is required");
+                std::process::exit(1);
+            });
+        let chain_id = eth_config
+            .get("chain_id")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(11155111) as u64;
+
+        if pk_hex.is_empty() {
+            eprintln!("Error: anchor.ethereum.private_key_hex is empty");
+            std::process::exit(1);
+        }
+
+        println!("Anchoring to Ethereum ({network})...");
+        let eth = EthereumAnchor::new(EthereumConfig {
+            rpc_url: rpc_url.to_string(),
+            network: network.to_string(),
+            private_key_hex: pk_hex.to_string(),
+            chain_id,
+        });
+
+        match eth.anchor(&merkle_root).await {
+            Ok(receipt) => {
+                println!("  Ethereum anchor: SUCCESS");
+                println!("  tx_hash: {}", receipt.tx_id);
+                receipts.push(receipt);
+            }
+            Err(e) => {
+                eprintln!("  Ethereum anchor: FAILED ({e})");
+            }
+        }
+    }
+
+    // 5. Save receipts to manifest directory
+    if !receipts.is_empty() {
+        let receipts_path = keys::vault_dir()
+            .join("manifests")
+            .join(format!("{}.anchors.json", manifest.backup_id));
+        match serde_json::to_string_pretty(&receipts) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&receipts_path, json) {
+                    eprintln!("Warning: Failed to save anchor receipts: {e}");
+                } else {
+                    println!();
+                    println!("Anchor receipts saved: {}", receipts_path.display());
+                }
+            }
+            Err(e) => eprintln!("Warning: Failed to serialize receipts: {e}"),
+        }
+    }
+
+    // 6. Summary
+    println!();
+    let total = (use_btc as usize) + (use_eth as usize);
+    println!("Anchoring complete: {}/{total} succeeded.", receipts.len());
 }
 
 /// BLAKE3 fingerprint of a public key (first 8 bytes, hex-encoded).

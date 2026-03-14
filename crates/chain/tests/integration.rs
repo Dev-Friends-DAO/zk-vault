@@ -552,3 +552,60 @@ async fn e2e_mode_b_upload_download() {
     assert_eq!(status.height, 1);
     assert_eq!(status.file_count, 1);
 }
+
+/// Super Merkle Tree batching: multiple users → single super root for anchoring
+#[tokio::test]
+async fn anchor_status_super_merkle_tree() {
+    let net = TestNetwork::spawn(3).await;
+    let client = reqwest::Client::new();
+    let base = &net.urls[0];
+
+    // Each validator registers a file
+    for (i, (sk, pk)) in net.keys.iter().enumerate() {
+        let mut root = [0u8; 32];
+        root[0] = (i + 1) as u8;
+        let tx = make_register_tx(sk, pk, root);
+        // Submit all to node 0
+        net.nodes[0].lock().unwrap().submit_tx(tx).unwrap();
+    }
+    net.propose_and_broadcast();
+
+    // All nodes should have 3 files
+    for node in &net.nodes {
+        assert_eq!(node.lock().unwrap().state().file_count(), 3);
+    }
+
+    // Query anchor_status from any node
+    let resp: rpc::AnchorStatusResponse = client
+        .get(format!("{base}/anchor_status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.file_count, 3);
+    assert!(resp.super_root.is_some());
+    assert_eq!(resp.user_proofs.len(), 3);
+
+    // All nodes should produce the same super root
+    let mut super_roots = Vec::new();
+    for url in &net.urls {
+        let resp: rpc::AnchorStatusResponse = client
+            .get(format!("{url}/anchor_status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        super_roots.push(resp.super_root.unwrap());
+    }
+    assert_eq!(super_roots[0], super_roots[1]);
+    assert_eq!(super_roots[1], super_roots[2]);
+
+    // Super root is what would be anchored to BTC/ETH
+    let super_root_hex = &super_roots[0];
+    assert_eq!(super_root_hex.len(), 64); // 32 bytes = 64 hex chars
+}

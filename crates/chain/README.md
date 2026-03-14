@@ -51,6 +51,7 @@ cargo run -p zk-vault-chain --example local_node
 | POST | `/upload_data` | Upload encrypted data blob (Mode B) |
 | POST | `/download_data` | Download encrypted data blob (Mode B) |
 | GET | `/list_data` | List stored blobs and total size (Mode B) |
+| GET | `/anchor_status` | Super Merkle Tree root + per-file proofs for anchoring |
 
 See [docs/CLI.md](../../docs/CLI.md) for full RPC reference (request/response examples, error codes, curl commands, E2E workflows).
 
@@ -65,7 +66,7 @@ See [docs/CLI.md](../../docs/CLI.md) for full RPC reference (request/response ex
 ## Tests
 
 ```bash
-cargo test -p zk-vault-chain              # all (68 tests)
-cargo test -p zk-vault-chain --lib        # unit tests only (60)
-cargo test -p zk-vault-chain --test integration  # integration only (8)
+cargo test -p zk-vault-chain              # all (71 tests)
+cargo test -p zk-vault-chain --lib        # unit tests only (62)
+cargo test -p zk-vault-chain --test integration  # integration only (9)
 ```

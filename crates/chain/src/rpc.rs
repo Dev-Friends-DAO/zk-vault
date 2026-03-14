@@ -102,6 +102,26 @@ pub struct ListDataResponse {
     pub total_size: u64,
 }
 
+/// Anchor status response (Super Merkle Tree batching).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AnchorStatusResponse {
+    /// Number of registered files included in the Super Merkle Tree.
+    pub file_count: usize,
+    /// Hex-encoded Super Merkle Root (BLAKE3).
+    pub super_root: Option<String>,
+    /// User proofs (user_id → hex proof).
+    pub user_proofs: Vec<SuperProofEntry>,
+}
+
+/// A single user's proof in the Super Merkle Tree.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SuperProofEntry {
+    pub owner_pk: String,
+    pub merkle_root: String,
+    pub proof_index: usize,
+    pub proof_hashes: Vec<String>,
+}
+
 /// Generic error response.
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
@@ -120,6 +140,7 @@ pub fn router(node: SharedNode) -> Router {
         .route("/upload_data", post(handle_upload_data))
         .route("/download_data", post(handle_download_data))
         .route("/list_data", get(handle_list_data))
+        .route("/anchor_status", get(handle_anchor_status))
         .route("/health", get(handle_health))
         .with_state(node)
 }
@@ -303,6 +324,50 @@ async fn handle_download_data(
         data_b64,
         size,
     }))
+}
+
+async fn handle_anchor_status(State(node): State<SharedNode>) -> Json<AnchorStatusResponse> {
+    let node = node.lock().unwrap();
+    let state = node.state();
+
+    if state.file_registry.is_empty() {
+        return Json(AnchorStatusResponse {
+            file_count: 0,
+            super_root: None,
+            user_proofs: vec![],
+        });
+    }
+
+    // Build Super Merkle Tree from all registered file roots
+    let leaf_hashes: Vec<[u8; 32]> = state.file_registry.keys().copied().collect();
+    let entries: Vec<_> = state
+        .file_registry
+        .iter()
+        .map(|(root, entry)| (*root, entry.owner_pk))
+        .collect();
+
+    let tree = zk_vault_core::merkle::tree::MerkleTree::from_leaf_hashes(leaf_hashes);
+    let super_root = tree.root();
+
+    let user_proofs: Vec<SuperProofEntry> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (root, owner_pk))| {
+            let proof = tree.prove(i)?;
+            Some(SuperProofEntry {
+                owner_pk: hex::encode(owner_pk),
+                merkle_root: hex::encode(root),
+                proof_index: proof.leaf_index,
+                proof_hashes: proof.siblings.iter().map(|(_, h)| hex::encode(h)).collect(),
+            })
+        })
+        .collect();
+
+    Json(AnchorStatusResponse {
+        file_count: state.file_registry.len(),
+        super_root: super_root.map(hex::encode),
+        user_proofs,
+    })
 }
 
 async fn handle_list_data(State(node): State<SharedNode>) -> Json<ListDataResponse> {
@@ -693,5 +758,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 400);
+    }
+
+    // ── Anchor status tests ──
+
+    #[tokio::test]
+    async fn anchor_status_empty() {
+        let (base, _, _) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+
+        let resp: AnchorStatusResponse = client
+            .get(format!("{base}/anchor_status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(resp.file_count, 0);
+        assert!(resp.super_root.is_none());
+        assert!(resp.user_proofs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn anchor_status_with_files() {
+        let (base, _, keys) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+        let (sk, pk) = &keys[0];
+
+        // Register 3 files
+        for i in 0..3u8 {
+            let mut root = [0u8; 32];
+            root[0] = i;
+            let tx = make_register_tx(sk, pk, root);
+            let tx_json = serde_json::to_string(&tx).unwrap();
+            client
+                .post(format!("{base}/submit_tx"))
+                .json(&SubmitTxRequest { tx_json })
+                .send()
+                .await
+                .unwrap();
+        }
+
+        // Propose
+        client.post(format!("{base}/propose")).send().await.unwrap();
+
+        // Check anchor status
+        let resp: AnchorStatusResponse = client
+            .get(format!("{base}/anchor_status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(resp.file_count, 3);
+        assert!(resp.super_root.is_some());
+        assert_eq!(resp.user_proofs.len(), 3);
+
+        // Each proof should have the correct owner
+        for proof in &resp.user_proofs {
+            assert_eq!(proof.owner_pk, hex::encode(pk));
+            assert!(!proof.proof_hashes.is_empty());
+        }
     }
 }

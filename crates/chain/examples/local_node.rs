@@ -110,6 +110,9 @@ async fn main() {
     println!("# List stored blobs (Mode B)");
     println!("curl -s {addr}/list_data | jq");
     println!();
+    println!("# Super Merkle Tree for anchoring");
+    println!("curl -s {addr}/anchor_status | jq");
+    println!();
     println!("=========================================");
     println!();
 

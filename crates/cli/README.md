@@ -23,6 +23,7 @@ zk-vault status                            # show vault info
 | `restore` | Decrypt + restore from backup |
 | `verify` | Verify backup integrity without decrypting |
 | `status` | Show vault info, keys, storage config, backups |
+| `anchor` | Anchor Merkle root to Bitcoin / Ethereum |
 
 ## Key Flags
 
@@ -30,6 +31,8 @@ zk-vault status                            # show vault info
 |---|---|---|
 | `--local <DIR>` | `backup` | Save to local directory (Layer 0) |
 | `--chain <URL>` | `backup`, `restore`, `verify`, `status` | Chain node URL (Mode B) |
+| `--anchor` | `backup` | Anchor Merkle root to configured blockchains |
+| `--btc` / `--eth` | `anchor` | Select anchor target(s) |
 | `-o, --output <DIR>` | `restore` | Output directory |
 
 See [docs/CLI.md](../../docs/CLI.md) for full reference (all flags, config setup, chain RPC, E2E examples).

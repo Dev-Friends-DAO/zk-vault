@@ -119,6 +119,43 @@ zk-vault verify <BACKUP> [--chain <URL>]
 | 3 | Bundle hash verification | Download bundles and verify they parse correctly |
 | 4 | Manifest consistency | Verify file_count and size totals match |
 
+### `zk-vault anchor`
+
+Anchor a backup's Merkle root to Bitcoin (OP_RETURN) and/or Ethereum (calldata).
+
+```bash
+zk-vault anchor <BACKUP> --btc --eth
+```
+
+| Flag | Description |
+|---|---|
+| `--btc` | Anchor to Bitcoin via OP_RETURN |
+| `--eth` | Anchor to Ethereum via calldata |
+
+```bash
+# Anchor to Bitcoin only
+zk-vault anchor <backup-id> --btc
+
+# Anchor to Ethereum only
+zk-vault anchor <backup-id> --eth
+
+# Anchor to both
+zk-vault anchor <backup-id> --btc --eth
+```
+
+Requires `[anchor.bitcoin]` and/or `[anchor.ethereum]` in `~/.zk-vault/config.toml`.
+
+Anchor receipts are saved to `~/.zk-vault/manifests/<backup-id>.anchors.json`.
+
+### `zk-vault backup --anchor`
+
+The `--anchor` flag on `backup` automatically anchors the Merkle root to all configured blockchains after backup completes:
+
+```bash
+zk-vault backup --local ./backups --anchor ./my-data
+zk-vault backup --local ./backups --chain http://localhost:3030 --anchor ./my-data
+```
+
 ### `zk-vault status`
 
 Show vault status: keys, storage config, and recent backups.
@@ -261,6 +298,31 @@ curl -s localhost:3030/list_data | jq
 { "keys": ["user-id/file-a", "user-id/file-b"], "total_size": 2048 }
 ```
 
+### GET /anchor_status
+
+Get the Super Merkle Tree root and per-file inclusion proofs for anchoring.
+
+```bash
+curl -s localhost:3030/anchor_status | jq
+```
+
+```json
+{
+  "file_count": 3,
+  "super_root": "abcdef...",
+  "user_proofs": [
+    {
+      "owner_pk": "0102...",
+      "merkle_root": "aabb...",
+      "proof_index": 0,
+      "proof_hashes": ["ccdd...", "eeff..."]
+    }
+  ]
+}
+```
+
+The `super_root` is the single 32-byte hash that gets anchored to BTC/ETH. One transaction covers all registered files.
+
 ### Transaction Types
 
 | Type | Fields | Description |
@@ -287,6 +349,19 @@ region = "us-east-1"
 access_key = ""
 secret_key = ""
 # path_style = true  # required for MinIO and some S3-compatible providers
+```
+
+```toml
+[anchor.bitcoin]
+api_url = "https://mempool.space/testnet/api"
+network = "testnet"         # "mainnet", "testnet", or "signet"
+wif_private_key = ""        # Bitcoin WIF private key
+
+[anchor.ethereum]
+rpc_url = "https://sepolia.infura.io/v3/YOUR_KEY"
+network = "sepolia"         # "mainnet", "sepolia", or "holesky"
+private_key_hex = ""        # Ethereum private key (hex, no 0x prefix)
+chain_id = 11155111         # 1 for mainnet, 11155111 for Sepolia
 ```
 
 If no config exists, use `--local` for local-only backups.
@@ -322,9 +397,9 @@ cargo build -p zk-vault-cli --release      # release binary
 ### Test
 
 ```bash
-cargo test --workspace                     # all tests (128 total)
+cargo test --workspace                     # all tests (131 total)
 cargo test -p zk-vault-core               # core: 60 tests
-cargo test -p zk-vault-chain              # chain: 68 tests (60 unit + 8 integration)
+cargo test -p zk-vault-chain              # chain: 71 tests (62 unit + 9 integration)
 cargo test -p zk-vault-chain --lib        # chain unit tests only
 cargo test -p zk-vault-chain --test integration  # chain integration tests only
 cargo test -p zk-vault-cli               # CLI tests
