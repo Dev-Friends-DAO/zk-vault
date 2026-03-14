@@ -199,6 +199,24 @@ impl Node {
         self.state.get_file(merkle_root)
     }
 
+    /// Get the guardian set for an owner.
+    pub fn get_guardians(&self, owner_pk: &[u8; 32]) -> Option<&crate::state::GuardianSet> {
+        self.state.guardian_registry.get(owner_pk)
+    }
+
+    /// Get the recovery request status for an owner.
+    pub fn get_recovery_status(
+        &self,
+        owner_pk: &[u8; 32],
+    ) -> Option<&crate::state::RecoveryRequest> {
+        self.state.recovery_requests.get(owner_pk)
+    }
+
+    /// Get the key status for an owner.
+    pub fn get_key_status(&self, owner_pk: &[u8; 32]) -> Option<&crate::state::KeyEntry> {
+        self.state.key_registry.get(owner_pk)
+    }
+
     // ── Blob store operations (Mode B) ──
 
     /// Store an encrypted data blob. Returns the size in bytes.

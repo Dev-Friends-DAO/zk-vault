@@ -34,6 +34,27 @@ pub enum StateError {
 
     #[error("Ed25519 verification error: {0}")]
     Ed25519Error(String),
+
+    #[error("Guardian already registered: {0}")]
+    DuplicateGuardian(String),
+
+    #[error("No recovery request found for {0}")]
+    NoRecoveryRequest(String),
+
+    #[error("Guardian not in guardian set: {0}")]
+    GuardianNotFound(String),
+
+    #[error("Key has been revoked")]
+    RevokedKey,
+
+    #[error("Recovery already completed")]
+    RecoveryCompleted,
+
+    #[error("No guardian set found for {0}")]
+    NoGuardianSet(String),
+
+    #[error("Guardian set threshold mismatch")]
+    ThresholdMismatch,
 }
 
 pub type Result<T> = std::result::Result<T, StateError>;
@@ -55,6 +76,58 @@ pub struct FileEntry {
     pub verifications: BTreeSet<[u8; 32]>,
 }
 
+// ── Guardian Recovery types ──
+
+/// Guardian entry in the registry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuardianEntry {
+    pub guardian_pk: [u8; 32],
+    pub encrypted_share: String,
+    pub registered_at: Height,
+}
+
+/// Guardian set for a user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuardianSet {
+    pub owner_pk: [u8; 32],
+    pub threshold: u8,
+    pub total_guardians: u8,
+    pub guardians: Vec<GuardianEntry>,
+}
+
+/// Recovery request status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecoveryStatus {
+    Pending,
+    Completed,
+    Cancelled,
+}
+
+/// Active recovery request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryRequest {
+    pub owner_pk: [u8; 32],
+    pub new_pk: [u8; 32],
+    pub requested_at: Height,
+    pub status: RecoveryStatus,
+    pub approvals: Vec<RecoveryApproval>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryApproval {
+    pub guardian_pk: [u8; 32],
+    pub share_data: String,
+    pub approved_at: Height,
+}
+
+/// Key status entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyEntry {
+    pub current_pk: [u8; 32],
+    pub revoked_pks: Vec<[u8; 32]>,
+    pub last_rotated: Height,
+}
+
 // ── Chain State ──
 
 /// The full chain state.
@@ -68,6 +141,12 @@ pub struct ChainState {
     pub validator_set: ValidatorSet,
     /// The file registry: merkle_root → FileEntry.
     pub file_registry: BTreeMap<[u8; 32], FileEntry>,
+    /// Guardian registry: owner_pk → GuardianSet.
+    pub guardian_registry: BTreeMap<[u8; 32], GuardianSet>,
+    /// Active recovery requests: owner_pk → RecoveryRequest.
+    pub recovery_requests: BTreeMap<[u8; 32], RecoveryRequest>,
+    /// Key registry: owner_pk → KeyEntry (for revocation tracking).
+    pub key_registry: BTreeMap<[u8; 32], KeyEntry>,
 }
 
 impl ChainState {
@@ -79,10 +158,13 @@ impl ChainState {
             last_block_id: genesis_block.id(),
             validator_set,
             file_registry: BTreeMap::new(),
+            guardian_registry: BTreeMap::new(),
+            recovery_requests: BTreeMap::new(),
+            key_registry: BTreeMap::new(),
         }
     }
 
-    /// Compute the state root: BLAKE3 hash of the file registry entries.
+    /// Compute the state root: BLAKE3 hash of the file registry, guardian registry, and key registry.
     pub fn state_root(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
         for (merkle_root, entry) in &self.file_registry {
@@ -90,6 +172,18 @@ impl ChainState {
             let entry_bytes =
                 serde_json::to_vec(entry).expect("FileEntry serialization cannot fail");
             hasher.update(&entry_bytes);
+        }
+        for (owner_pk, guardian_set) in &self.guardian_registry {
+            hasher.update(owner_pk);
+            let gs_bytes =
+                serde_json::to_vec(guardian_set).expect("GuardianSet serialization cannot fail");
+            hasher.update(&gs_bytes);
+        }
+        for (owner_pk, key_entry) in &self.key_registry {
+            hasher.update(owner_pk);
+            let ke_bytes =
+                serde_json::to_vec(key_entry).expect("KeyEntry serialization cannot fail");
+            hasher.update(&ke_bytes);
         }
         *hasher.finalize().as_bytes()
     }
@@ -145,6 +239,13 @@ impl ChainState {
                 owner_pk,
                 signature,
             } => {
+                // Check key is not revoked
+                if let Some(key_entry) = self.key_registry.get(owner_pk) {
+                    if key_entry.revoked_pks.contains(owner_pk) {
+                        return Err(StateError::RevokedKey);
+                    }
+                }
+
                 // Verify signature
                 verify_ed25519(owner_pk, merkle_root, signature)?;
 
@@ -173,6 +274,13 @@ impl ChainState {
                 verifier_pk,
                 signature,
             } => {
+                // Check key is not revoked
+                if let Some(key_entry) = self.key_registry.get(verifier_pk) {
+                    if key_entry.revoked_pks.contains(verifier_pk) {
+                        return Err(StateError::RevokedKey);
+                    }
+                }
+
                 // Verify signature
                 verify_ed25519(verifier_pk, merkle_root, signature)?;
 
@@ -215,6 +323,169 @@ impl ChainState {
                     .map(|(pk, power)| Validator::new(*pk, *power))
                     .collect();
                 self.validator_set = ValidatorSet::new(new_validators);
+            }
+
+            Transaction::RegisterGuardian {
+                owner_pk,
+                guardian_pk,
+                encrypted_share,
+                threshold,
+                total_guardians,
+                signature,
+            } => {
+                // Verify owner signature over BLAKE3(guardian_pk || threshold || total_guardians)
+                let mut msg = Vec::new();
+                msg.extend_from_slice(guardian_pk);
+                msg.push(*threshold);
+                msg.push(*total_guardians);
+                let msg_hash = blake3::hash(&msg);
+                verify_ed25519(owner_pk, msg_hash.as_bytes(), signature)?;
+
+                // Create or update guardian set
+                let guardian_set =
+                    self.guardian_registry
+                        .entry(*owner_pk)
+                        .or_insert_with(|| GuardianSet {
+                            owner_pk: *owner_pk,
+                            threshold: *threshold,
+                            total_guardians: *total_guardians,
+                            guardians: Vec::new(),
+                        });
+
+                // Validate threshold and total_guardians match
+                if guardian_set.threshold != *threshold
+                    || guardian_set.total_guardians != *total_guardians
+                {
+                    return Err(StateError::ThresholdMismatch);
+                }
+
+                // Check for duplicate guardian
+                if guardian_set
+                    .guardians
+                    .iter()
+                    .any(|g| g.guardian_pk == *guardian_pk)
+                {
+                    return Err(StateError::DuplicateGuardian(hex::encode(
+                        &guardian_pk[..8],
+                    )));
+                }
+
+                // Add guardian entry
+                guardian_set.guardians.push(GuardianEntry {
+                    guardian_pk: *guardian_pk,
+                    encrypted_share: encrypted_share.clone(),
+                    registered_at: height,
+                });
+            }
+
+            Transaction::RequestRecovery {
+                owner_pk,
+                new_pk,
+                signature,
+            } => {
+                // Verify signature (with new_pk over owner_pk, since original key may be lost)
+                verify_ed25519(new_pk, owner_pk, signature)?;
+
+                // Check guardian set exists for owner_pk
+                if !self.guardian_registry.contains_key(owner_pk) {
+                    return Err(StateError::NoGuardianSet(hex::encode(&owner_pk[..8])));
+                }
+
+                // Create recovery request with Pending status
+                self.recovery_requests.insert(
+                    *owner_pk,
+                    RecoveryRequest {
+                        owner_pk: *owner_pk,
+                        new_pk: *new_pk,
+                        requested_at: height,
+                        status: RecoveryStatus::Pending,
+                        approvals: Vec::new(),
+                    },
+                );
+            }
+
+            Transaction::ApproveRecovery {
+                owner_pk,
+                guardian_pk,
+                share_data,
+                signature,
+            } => {
+                // Verify guardian signature over BLAKE3(owner_pk || share_data)
+                let mut msg = Vec::new();
+                msg.extend_from_slice(owner_pk);
+                msg.extend_from_slice(share_data.as_bytes());
+                let msg_hash = blake3::hash(&msg);
+                verify_ed25519(guardian_pk, msg_hash.as_bytes(), signature)?;
+
+                // Check guardian is in the owner's guardian set
+                let guardian_set = self
+                    .guardian_registry
+                    .get(owner_pk)
+                    .ok_or_else(|| StateError::NoGuardianSet(hex::encode(&owner_pk[..8])))?;
+
+                if !guardian_set
+                    .guardians
+                    .iter()
+                    .any(|g| g.guardian_pk == *guardian_pk)
+                {
+                    return Err(StateError::GuardianNotFound(hex::encode(&guardian_pk[..8])));
+                }
+
+                let threshold = guardian_set.threshold;
+
+                // Check recovery request exists and is Pending
+                let request = self
+                    .recovery_requests
+                    .get_mut(owner_pk)
+                    .ok_or_else(|| StateError::NoRecoveryRequest(hex::encode(&owner_pk[..8])))?;
+
+                if request.status != RecoveryStatus::Pending {
+                    return Err(StateError::RecoveryCompleted);
+                }
+
+                // Add approval
+                request.approvals.push(RecoveryApproval {
+                    guardian_pk: *guardian_pk,
+                    share_data: share_data.clone(),
+                    approved_at: height,
+                });
+
+                // If approvals >= threshold, mark as Completed
+                if request.approvals.len() >= threshold as usize {
+                    request.status = RecoveryStatus::Completed;
+                }
+            }
+
+            Transaction::RevokeKeys {
+                owner_pk,
+                new_ed25519_pk,
+                signature,
+            } => {
+                // Verify signature with current owner_pk over BLAKE3(new_ed25519_pk)
+                let msg_hash = blake3::hash(new_ed25519_pk);
+                verify_ed25519(owner_pk, msg_hash.as_bytes(), signature)?;
+
+                // Check key is not already revoked
+                if let Some(key_entry) = self.key_registry.get(owner_pk) {
+                    if key_entry.revoked_pks.contains(owner_pk) {
+                        return Err(StateError::RevokedKey);
+                    }
+                }
+
+                // Update key_registry
+                let key_entry = self
+                    .key_registry
+                    .entry(*owner_pk)
+                    .or_insert_with(|| KeyEntry {
+                        current_pk: *owner_pk,
+                        revoked_pks: Vec::new(),
+                        last_rotated: height,
+                    });
+
+                // Add current pk to revoked list, set new current pk
+                key_entry.revoked_pks.push(key_entry.current_pk);
+                key_entry.current_pk = *new_ed25519_pk;
+                key_entry.last_rotated = height;
             }
         }
 
@@ -464,6 +735,229 @@ mod tests {
 
         let root_after = state.state_root();
         assert_ne!(root_before, root_after);
+    }
+
+    // ── Guardian Recovery tests ──
+
+    fn register_guardian_tx(
+        owner_sk: &SigningKey,
+        owner_pk: &[u8; 32],
+        guardian_pk: &[u8; 32],
+        encrypted_share: &str,
+        threshold: u8,
+        total_guardians: u8,
+    ) -> Transaction {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(guardian_pk);
+        msg.push(threshold);
+        msg.push(total_guardians);
+        let msg_hash = blake3::hash(&msg);
+        let sig = owner_sk.sign(msg_hash.as_bytes());
+        Transaction::RegisterGuardian {
+            owner_pk: *owner_pk,
+            guardian_pk: *guardian_pk,
+            encrypted_share: encrypted_share.to_string(),
+            threshold,
+            total_guardians,
+            signature: sig.to_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn register_guardian() {
+        let (vs, keys) = test_validator_set();
+        let mut state = ChainState::genesis(vs);
+        let (owner_sk, owner_pk) = &keys[0];
+
+        // Register 3 guardians
+        let mut txs = Vec::new();
+        for i in 1..=3u8 {
+            let (_, gpk) = make_keypair(10 + i);
+            txs.push(register_guardian_tx(
+                owner_sk,
+                owner_pk,
+                &gpk,
+                &format!("share_{i}"),
+                2,
+                3,
+            ));
+        }
+
+        let block = make_block(&state, txs);
+        state.apply_block(&block).unwrap();
+
+        let gs = state.guardian_registry.get(owner_pk).unwrap();
+        assert_eq!(gs.guardians.len(), 3);
+        assert_eq!(gs.threshold, 2);
+        assert_eq!(gs.total_guardians, 3);
+    }
+
+    #[test]
+    fn request_recovery() {
+        let (vs, keys) = test_validator_set();
+        let mut state = ChainState::genesis(vs);
+        let (owner_sk, owner_pk) = &keys[0];
+
+        // Register guardians first
+        let guardian_keys: Vec<_> = (11..=13).map(make_keypair).collect();
+        let mut txs = Vec::new();
+        for (_, gpk) in &guardian_keys {
+            txs.push(register_guardian_tx(owner_sk, owner_pk, gpk, "share", 2, 3));
+        }
+        let block = make_block(&state, txs);
+        state.apply_block(&block).unwrap();
+
+        // Request recovery with a new key
+        let (new_sk, new_pk) = make_keypair(99);
+        let sig = new_sk.sign(owner_pk);
+        let tx = Transaction::RequestRecovery {
+            owner_pk: *owner_pk,
+            new_pk,
+            signature: sig.to_bytes().to_vec(),
+        };
+        let block2 = make_block(&state, vec![tx]);
+        state.apply_block(&block2).unwrap();
+
+        let req = state.recovery_requests.get(owner_pk).unwrap();
+        assert_eq!(req.status, super::RecoveryStatus::Pending);
+        assert_eq!(req.new_pk, new_pk);
+    }
+
+    #[test]
+    fn approve_recovery() {
+        let (vs, keys) = test_validator_set();
+        let mut state = ChainState::genesis(vs);
+        let (owner_sk, owner_pk) = &keys[0];
+
+        // Register 3 guardians with threshold 2
+        let guardian_keys: Vec<_> = (11..=13).map(make_keypair).collect();
+        let mut txs = Vec::new();
+        for (_, gpk) in &guardian_keys {
+            txs.push(register_guardian_tx(owner_sk, owner_pk, gpk, "share", 2, 3));
+        }
+        let block = make_block(&state, txs);
+        state.apply_block(&block).unwrap();
+
+        // Request recovery
+        let (new_sk, new_pk) = make_keypair(99);
+        let sig = new_sk.sign(owner_pk);
+        let block2 = make_block(
+            &state,
+            vec![Transaction::RequestRecovery {
+                owner_pk: *owner_pk,
+                new_pk,
+                signature: sig.to_bytes().to_vec(),
+            }],
+        );
+        state.apply_block(&block2).unwrap();
+
+        // First guardian approves
+        let (g1_sk, g1_pk) = &guardian_keys[0];
+        let share_data_1 = "recovered_share_1";
+        let mut msg1 = Vec::new();
+        msg1.extend_from_slice(owner_pk);
+        msg1.extend_from_slice(share_data_1.as_bytes());
+        let msg1_hash = blake3::hash(&msg1);
+        let g1_sig = g1_sk.sign(msg1_hash.as_bytes());
+        let block3 = make_block(
+            &state,
+            vec![Transaction::ApproveRecovery {
+                owner_pk: *owner_pk,
+                guardian_pk: *g1_pk,
+                share_data: share_data_1.to_string(),
+                signature: g1_sig.to_bytes().to_vec(),
+            }],
+        );
+        state.apply_block(&block3).unwrap();
+
+        // Still pending (need 2)
+        assert_eq!(
+            state.recovery_requests.get(owner_pk).unwrap().status,
+            super::RecoveryStatus::Pending
+        );
+
+        // Second guardian approves -> should complete
+        let (g2_sk, g2_pk) = &guardian_keys[1];
+        let share_data_2 = "recovered_share_2";
+        let mut msg2 = Vec::new();
+        msg2.extend_from_slice(owner_pk);
+        msg2.extend_from_slice(share_data_2.as_bytes());
+        let msg2_hash = blake3::hash(&msg2);
+        let g2_sig = g2_sk.sign(msg2_hash.as_bytes());
+        let block4 = make_block(
+            &state,
+            vec![Transaction::ApproveRecovery {
+                owner_pk: *owner_pk,
+                guardian_pk: *g2_pk,
+                share_data: share_data_2.to_string(),
+                signature: g2_sig.to_bytes().to_vec(),
+            }],
+        );
+        state.apply_block(&block4).unwrap();
+
+        // Now completed
+        let req = state.recovery_requests.get(owner_pk).unwrap();
+        assert_eq!(req.status, super::RecoveryStatus::Completed);
+        assert_eq!(req.approvals.len(), 2);
+    }
+
+    #[test]
+    fn revoke_keys() {
+        let (vs, keys) = test_validator_set();
+        let mut state = ChainState::genesis(vs);
+        let (owner_sk, owner_pk) = &keys[0];
+
+        // Revoke and set new key
+        let (_, new_pk) = make_keypair(50);
+        let msg_hash = blake3::hash(&new_pk);
+        let sig = owner_sk.sign(msg_hash.as_bytes());
+        let tx = Transaction::RevokeKeys {
+            owner_pk: *owner_pk,
+            new_ed25519_pk: new_pk,
+            signature: sig.to_bytes().to_vec(),
+        };
+        let block = make_block(&state, vec![tx]);
+        state.apply_block(&block).unwrap();
+
+        let ke = state.key_registry.get(owner_pk).unwrap();
+        assert_eq!(ke.current_pk, new_pk);
+        assert!(ke.revoked_pks.contains(owner_pk));
+        assert_eq!(ke.last_rotated, Height(1));
+    }
+
+    #[test]
+    fn register_with_revoked_key_fails() {
+        let (vs, keys) = test_validator_set();
+        let mut state = ChainState::genesis(vs);
+        let (owner_sk, owner_pk) = &keys[0];
+
+        // Revoke key
+        let (_, new_pk) = make_keypair(50);
+        let msg_hash = blake3::hash(&new_pk);
+        let sig = owner_sk.sign(msg_hash.as_bytes());
+        let block = make_block(
+            &state,
+            vec![Transaction::RevokeKeys {
+                owner_pk: *owner_pk,
+                new_ed25519_pk: new_pk,
+                signature: sig.to_bytes().to_vec(),
+            }],
+        );
+        state.apply_block(&block).unwrap();
+
+        // Try to register a file with the old (now revoked) key
+        let merkle_root = [0xAB; 32];
+        let file_sig = owner_sk.sign(&merkle_root);
+        let tx = Transaction::RegisterFile {
+            merkle_root,
+            file_count: 1,
+            encrypted_size: 100,
+            owner_pk: *owner_pk,
+            signature: file_sig.to_bytes().to_vec(),
+        };
+        let block2 = make_block(&state, vec![tx]);
+        let result = state.apply_block(&block2);
+        assert!(result.is_err());
     }
 
     #[test]

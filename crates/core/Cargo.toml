@@ -26,6 +26,9 @@ argon2 = "0.5"
 hkdf = "0.12"
 sha2 = "0.10"
 
+# BIP-39 mnemonic
+bip39 = "2"
+
 # Memory safety
 zeroize = { version = "1", features = ["derive"] }
 
@@ -47,6 +50,9 @@ async-trait = "0.1"
 # Blockchain anchoring
 bitcoin = { version = "0.32", features = ["serde", "rand-std"] }
 alloy = { version = "1", features = ["providers", "signers", "signer-local", "network", "consensus"] }
+
+# Shamir Secret Sharing
+sharks = "0.5"
 
 # Utilities
 rand = "0.8"

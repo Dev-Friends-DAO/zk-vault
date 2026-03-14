@@ -177,6 +177,54 @@ pub enum Transaction {
         /// Proposer signature.
         signature: Vec<u8>,
     },
+
+    /// Register a guardian for key recovery.
+    RegisterGuardian {
+        /// Owner's Ed25519 public key.
+        owner_pk: [u8; 32],
+        /// Guardian's Ed25519 public key (for chain identity).
+        guardian_pk: [u8; 32],
+        /// Encrypted Shamir share data (hex-encoded JSON of EncryptedGuardianShare).
+        encrypted_share: String,
+        /// Recovery threshold (K of N).
+        threshold: u8,
+        /// Total number of guardians (N).
+        total_guardians: u8,
+        /// Owner's Ed25519 signature over BLAKE3(guardian_pk || threshold || total_guardians).
+        signature: Vec<u8>,
+    },
+
+    /// Request key recovery (initiates the recovery process).
+    RequestRecovery {
+        /// Owner's Ed25519 public key (whose keys to recover).
+        owner_pk: [u8; 32],
+        /// New Ed25519 public key of the requester (for re-encrypted shares).
+        new_pk: [u8; 32],
+        /// Signature with owner's original key, OR if lost, signature with new_pk over owner_pk.
+        signature: Vec<u8>,
+    },
+
+    /// Guardian approves a recovery request by providing their decrypted share.
+    ApproveRecovery {
+        /// Owner whose keys are being recovered.
+        owner_pk: [u8; 32],
+        /// Guardian's Ed25519 public key.
+        guardian_pk: [u8; 32],
+        /// The share data (re-encrypted for the requester's new key).
+        share_data: String,
+        /// Guardian's Ed25519 signature over BLAKE3(owner_pk || share_data).
+        signature: Vec<u8>,
+    },
+
+    /// Revoke current keys and register new ones.
+    RevokeKeys {
+        /// Current Ed25519 public key (proves ownership).
+        owner_pk: [u8; 32],
+        /// New Ed25519 public key.
+        new_ed25519_pk: [u8; 32],
+        /// Signature with current Ed25519 key over BLAKE3(new_ed25519_pk).
+        signature: Vec<u8>,
+    },
 }
 
 impl Transaction {

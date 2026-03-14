@@ -206,6 +206,75 @@ fn pre_validate(tx: &Transaction, state: &ChainState) -> Result<()> {
                 ));
             }
         }
+
+        Transaction::RegisterGuardian {
+            owner_pk,
+            guardian_pk,
+            threshold,
+            total_guardians,
+            signature,
+            ..
+        } => {
+            if signature.is_empty() {
+                return Err(MempoolError::Invalid("empty signature".to_string()));
+            }
+            // Verify signature over BLAKE3(guardian_pk || threshold || total_guardians)
+            let mut msg = Vec::new();
+            msg.extend_from_slice(guardian_pk);
+            msg.push(*threshold);
+            msg.push(*total_guardians);
+            let msg_hash = blake3::hash(&msg);
+            verify_ed25519_quick(owner_pk, msg_hash.as_bytes(), signature)?;
+        }
+
+        Transaction::RequestRecovery {
+            owner_pk,
+            new_pk,
+            signature,
+        } => {
+            if signature.is_empty() {
+                return Err(MempoolError::Invalid("empty signature".to_string()));
+            }
+            // Verify signature with new_pk over owner_pk
+            verify_ed25519_quick(new_pk, owner_pk, signature)?;
+            // Check guardian set exists
+            if !state.guardian_registry.contains_key(owner_pk) {
+                return Err(MempoolError::Invalid(format!(
+                    "no guardian set for {}",
+                    hex::encode(&owner_pk[..8])
+                )));
+            }
+        }
+
+        Transaction::ApproveRecovery {
+            owner_pk,
+            guardian_pk,
+            share_data,
+            signature,
+        } => {
+            if signature.is_empty() {
+                return Err(MempoolError::Invalid("empty signature".to_string()));
+            }
+            // Verify guardian signature over BLAKE3(owner_pk || share_data)
+            let mut msg = Vec::new();
+            msg.extend_from_slice(owner_pk);
+            msg.extend_from_slice(share_data.as_bytes());
+            let msg_hash = blake3::hash(&msg);
+            verify_ed25519_quick(guardian_pk, msg_hash.as_bytes(), signature)?;
+        }
+
+        Transaction::RevokeKeys {
+            owner_pk,
+            new_ed25519_pk,
+            signature,
+        } => {
+            if signature.is_empty() {
+                return Err(MempoolError::Invalid("empty signature".to_string()));
+            }
+            // Verify signature with owner_pk over BLAKE3(new_ed25519_pk)
+            let msg_hash = blake3::hash(new_ed25519_pk);
+            verify_ed25519_quick(owner_pk, msg_hash.as_bytes(), signature)?;
+        }
     }
     Ok(())
 }

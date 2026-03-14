@@ -33,3 +33,4 @@ anyhow = "1"
 reqwest = { version = "0.12", features = ["json"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 base64 = "0.22"
+blake3 = "1"

@@ -41,6 +41,47 @@ pub fn derive_key(passphrase: &[u8], salt: &[u8]) -> Result<SensitiveBytes32> {
     Ok(SensitiveBytes32::new(output))
 }
 
+/// Derive PDK combining passphrase with optional keyfile and hardware key.
+/// Uses BLAKE3 key derivation to mix all factors after base Argon2id derivation.
+pub fn derive_pdk(
+    passphrase: &[u8],
+    salt: &[u8],
+    keyfile: Option<&[u8]>,
+    hwkey_response: Option<&[u8; 32]>,
+) -> Result<SensitiveBytes32> {
+    // Base derivation with Argon2id
+    let base_pdk = derive_key(passphrase, salt)?;
+
+    // If no additional factors, return base PDK
+    if keyfile.is_none() && hwkey_response.is_none() {
+        return Ok(base_pdk);
+    }
+
+    // Combine with additional factors using BLAKE3 derive_key
+    let mut ikm = Vec::new();
+    ikm.extend_from_slice(base_pdk.as_bytes());
+    if let Some(kf) = keyfile {
+        ikm.extend_from_slice(kf);
+    }
+    if let Some(hw) = hwkey_response {
+        ikm.extend_from_slice(hw);
+    }
+
+    let combined = crate::crypto::hash::derive_key("zk-vault-pdk-combined-v1", &ikm);
+    // Zeroize intermediate
+    use zeroize::Zeroize;
+    ikm.zeroize();
+
+    Ok(SensitiveBytes32::new(combined))
+}
+
+/// Generate a random keyfile (64 bytes).
+pub fn generate_keyfile() -> Vec<u8> {
+    let mut data = vec![0u8; 64];
+    rand::rngs::OsRng.fill_bytes(&mut data);
+    data
+}
+
 /// Derive a key with reduced parameters for testing (fast but insecure).
 #[cfg(test)]
 pub fn derive_key_test(passphrase: &[u8], salt: &[u8]) -> Result<SensitiveBytes32> {
@@ -60,6 +101,32 @@ pub fn derive_key_test(passphrase: &[u8], salt: &[u8]) -> Result<SensitiveBytes3
         .map_err(|e| VaultError::KeyDerivation(e.to_string()))?;
 
     Ok(SensitiveBytes32::new(output))
+}
+
+/// Derive PDK with reduced parameters for testing (fast but insecure).
+#[cfg(test)]
+pub fn derive_pdk_test(
+    passphrase: &[u8],
+    salt: &[u8],
+    keyfile: Option<&[u8]>,
+    hwkey_response: Option<&[u8; 32]>,
+) -> Result<SensitiveBytes32> {
+    let base_pdk = derive_key_test(passphrase, salt)?;
+    if keyfile.is_none() && hwkey_response.is_none() {
+        return Ok(base_pdk);
+    }
+    let mut ikm = Vec::new();
+    ikm.extend_from_slice(base_pdk.as_bytes());
+    if let Some(kf) = keyfile {
+        ikm.extend_from_slice(kf);
+    }
+    if let Some(hw) = hwkey_response {
+        ikm.extend_from_slice(hw);
+    }
+    let combined = crate::crypto::hash::derive_key("zk-vault-pdk-combined-v1", &ikm);
+    use zeroize::Zeroize;
+    ikm.zeroize();
+    Ok(SensitiveBytes32::new(combined))
 }
 
 #[cfg(test)]
@@ -94,5 +161,50 @@ mod tests {
         let s1 = generate_salt();
         let s2 = generate_salt();
         assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn test_derive_pdk_no_extras_same_as_base() {
+        let salt = [0x42u8; 32];
+        let base = derive_key_test(b"my passphrase", &salt).unwrap();
+        let pdk = derive_pdk_test(b"my passphrase", &salt, None, None).unwrap();
+        assert_eq!(base.as_bytes(), pdk.as_bytes());
+    }
+
+    #[test]
+    fn test_derive_pdk_with_keyfile_differs() {
+        let salt = [0x42u8; 32];
+        let base = derive_pdk_test(b"my passphrase", &salt, None, None).unwrap();
+        let keyfile = vec![0xABu8; 64];
+        let with_kf = derive_pdk_test(b"my passphrase", &salt, Some(&keyfile), None).unwrap();
+        assert_ne!(base.as_bytes(), with_kf.as_bytes());
+    }
+
+    #[test]
+    fn test_derive_pdk_with_hwkey_differs() {
+        let salt = [0x42u8; 32];
+        let base = derive_pdk_test(b"my passphrase", &salt, None, None).unwrap();
+        let hwkey = [0xCDu8; 32];
+        let with_hw = derive_pdk_test(b"my passphrase", &salt, None, Some(&hwkey)).unwrap();
+        assert_ne!(base.as_bytes(), with_hw.as_bytes());
+    }
+
+    #[test]
+    fn test_derive_pdk_wrong_keyfile_differs() {
+        let salt = [0x42u8; 32];
+        let kf1 = vec![0xAAu8; 64];
+        let kf2 = vec![0xBBu8; 64];
+        let pdk1 = derive_pdk_test(b"my passphrase", &salt, Some(&kf1), None).unwrap();
+        let pdk2 = derive_pdk_test(b"my passphrase", &salt, Some(&kf2), None).unwrap();
+        assert_ne!(pdk1.as_bytes(), pdk2.as_bytes());
+    }
+
+    #[test]
+    fn test_generate_keyfile_unique() {
+        let kf1 = generate_keyfile();
+        let kf2 = generate_keyfile();
+        assert_ne!(kf1, kf2);
+        assert_eq!(kf1.len(), 64);
+        assert_eq!(kf2.len(), 64);
     }
 }

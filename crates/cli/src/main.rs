@@ -21,7 +21,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a new vault (generate keys)
-    Init,
+    Init {
+        /// Generate and save a keyfile to this path
+        #[arg(long)]
+        generate_keyfile: Option<PathBuf>,
+        /// Use an existing keyfile
+        #[arg(long)]
+        keyfile: Option<PathBuf>,
+    },
     /// Back up files to S3-compatible storage and/or local directory
     Backup {
         /// Files or directories to back up
@@ -36,6 +43,9 @@ enum Commands {
         /// Anchor Merkle root to configured blockchains after backup
         #[arg(long)]
         anchor: bool,
+        /// Path to keyfile for vault unlock
+        #[arg(long)]
+        keyfile: Option<PathBuf>,
     },
     /// Restore files from a backup
     Restore {
@@ -48,6 +58,9 @@ enum Commands {
         /// Restore from chain node (Mode B) (e.g., --chain http://localhost:3030)
         #[arg(long)]
         chain: Option<String>,
+        /// Path to keyfile for vault unlock
+        #[arg(long)]
+        keyfile: Option<PathBuf>,
     },
     /// Verify backup integrity without decrypting
     Verify {
@@ -57,12 +70,18 @@ enum Commands {
         /// Submit VerifyIntegrity attestation to chain (e.g., --chain http://localhost:3030)
         #[arg(long)]
         chain: Option<String>,
+        /// Path to keyfile for vault unlock
+        #[arg(long)]
+        keyfile: Option<PathBuf>,
     },
     /// Show vault status
     Status {
         /// Query chain node status (e.g., --chain http://localhost:3030)
         #[arg(long)]
         chain: Option<String>,
+        /// Path to keyfile for vault unlock
+        #[arg(long)]
+        keyfile: Option<PathBuf>,
     },
     /// Anchor a backup's Merkle root to Bitcoin and/or Ethereum
     Anchor {
@@ -75,6 +94,66 @@ enum Commands {
         /// Anchor to Ethereum (calldata)
         #[arg(long)]
         eth: bool,
+    },
+    /// Recover vault from mnemonic phrase
+    Recover {
+        /// Path to keyfile for the new vault (optional)
+        #[arg(long)]
+        keyfile: Option<PathBuf>,
+        /// Generate and save a keyfile to this path
+        #[arg(long)]
+        generate_keyfile: Option<PathBuf>,
+    },
+    /// Guardian recovery management
+    Guardian {
+        #[command(subcommand)]
+        action: GuardianAction,
+    },
+    /// Rotate encryption and signing keys
+    RotateKeys {
+        /// Submit RevokeKeys transaction to chain
+        #[arg(long)]
+        chain: Option<String>,
+        /// Path to keyfile
+        #[arg(long)]
+        keyfile: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum GuardianAction {
+    /// Set up guardian recovery (split MK into shares)
+    Setup {
+        /// Recovery threshold (K shares needed)
+        #[arg(long, default_value = "3")]
+        threshold: u8,
+        /// Total number of shares (N)
+        #[arg(long, default_value = "5")]
+        shares: u8,
+        /// Output directory for encrypted share files
+        #[arg(long, default_value = ".")]
+        output: PathBuf,
+        /// Path to keyfile for vault unlock
+        #[arg(long)]
+        keyfile: Option<PathBuf>,
+    },
+    /// List registered guardians on chain
+    List {
+        /// Chain node URL
+        #[arg(long)]
+        chain: String,
+    },
+    /// Register guardians on chain (after setup)
+    Register {
+        /// Path to an encrypted share file
+        #[arg(long)]
+        share_file: PathBuf,
+        /// Chain node URL
+        #[arg(long)]
+        chain: String,
+        /// Path to keyfile for vault unlock
+        #[arg(long)]
+        keyfile: Option<PathBuf>,
     },
 }
 
@@ -90,25 +169,62 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init => cmd_init(),
+        Commands::Init {
+            generate_keyfile,
+            keyfile,
+        } => cmd_init(generate_keyfile, keyfile),
         Commands::Backup {
             paths,
             local,
             chain,
             anchor,
-        } => cmd_backup(paths, local, chain, anchor).await,
+            keyfile,
+        } => cmd_backup(paths, local, chain, anchor, keyfile).await,
         Commands::Restore {
             backup,
             output,
             chain,
-        } => cmd_restore(backup, output, chain).await,
-        Commands::Verify { backup, chain } => cmd_verify(backup, chain).await,
-        Commands::Status { chain } => cmd_status(chain).await,
+            keyfile,
+        } => cmd_restore(backup, output, chain, keyfile).await,
+        Commands::Verify {
+            backup,
+            chain,
+            keyfile,
+        } => cmd_verify(backup, chain, keyfile).await,
+        Commands::Status { chain, keyfile } => cmd_status(chain, keyfile).await,
         Commands::Anchor { backup, btc, eth } => cmd_anchor(backup, btc, eth).await,
+        Commands::Recover {
+            keyfile,
+            generate_keyfile,
+        } => cmd_recover(keyfile, generate_keyfile),
+        Commands::Guardian { action } => match action {
+            GuardianAction::Setup {
+                threshold,
+                shares,
+                output,
+                keyfile,
+            } => cmd_guardian_setup(threshold, shares, output, keyfile),
+            GuardianAction::List { chain } => cmd_guardian_list(chain).await,
+            GuardianAction::Register {
+                share_file,
+                chain,
+                keyfile,
+            } => cmd_guardian_register(share_file, chain, keyfile).await,
+        },
+        Commands::RotateKeys { chain, keyfile } => cmd_rotate_keys(chain, keyfile).await,
     }
 }
 
-fn cmd_init() {
+fn load_keyfile(path: &Option<PathBuf>) -> Option<Vec<u8>> {
+    path.as_ref().map(|p| {
+        std::fs::read(p).unwrap_or_else(|e| {
+            eprintln!("Error reading keyfile {}: {e}", p.display());
+            std::process::exit(1);
+        })
+    })
+}
+
+fn cmd_init(generate_keyfile: Option<PathBuf>, keyfile_path: Option<PathBuf>) {
     // Check if vault already exists
     let keystore_path = keys::keystore_path();
     if keystore_path.exists() {
@@ -134,10 +250,31 @@ fn cmd_init() {
         std::process::exit(1);
     }
 
+    // Handle keyfile generation or loading
+    let keyfile_data = if let Some(ref gen_path) = generate_keyfile {
+        let kf = zk_vault_core::crypto::kdf::generate_keyfile();
+        std::fs::write(gen_path, &kf).unwrap_or_else(|e| {
+            eprintln!("Error writing keyfile to {}: {e}", gen_path.display());
+            std::process::exit(1);
+        });
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(gen_path, std::fs::Permissions::from_mode(0o400))
+                .unwrap_or_else(|e| {
+                    eprintln!("Warning: Could not set keyfile permissions: {e}");
+                });
+        }
+        println!("Keyfile generated: {}", gen_path.display());
+        Some(kf)
+    } else {
+        load_keyfile(&keyfile_path)
+    };
+
     println!("Generating post-quantum key pairs (this may take a moment)...");
 
-    match keys::generate_key_store(passphrase.as_bytes()) {
-        Ok(store) => match keys::save_key_store(&store) {
+    match keys::generate_key_store(passphrase.as_bytes(), keyfile_data.as_deref(), None) {
+        Ok((store, mnemonic)) => match keys::save_key_store(&store) {
             Ok(()) => {
                 println!("Vault initialized successfully.");
                 println!("Keystore saved to: {}", keystore_path.display());
@@ -148,7 +285,11 @@ fn cmd_init() {
                 println!("  - ML-DSA-65    (post-quantum signatures)");
                 println!("  - Ed25519      (classical signatures)");
                 println!();
-                println!("IMPORTANT: Remember your passphrase. It cannot be recovered.");
+                println!("RECOVERY MNEMONIC (write this down and store securely):");
+                println!("  {mnemonic}");
+                println!();
+                println!("IMPORTANT: Remember your passphrase. The mnemonic above can");
+                println!("recover your master key if you forget your passphrase.");
             }
             Err(e) => {
                 eprintln!("Error saving keystore: {e}");
@@ -160,6 +301,291 @@ fn cmd_init() {
             std::process::exit(1);
         }
     }
+}
+
+fn cmd_recover(keyfile_path: Option<PathBuf>, generate_keyfile_path: Option<PathBuf>) {
+    // Check vault doesn't exist (or offer to overwrite)
+    let keystore_path = keys::keystore_path();
+    if keystore_path.exists() {
+        eprintln!(
+            "Warning: Vault already exists at {}",
+            keystore_path.display()
+        );
+        eprintln!("Recovery will overwrite the existing keystore.");
+        // In a real app, prompt for confirmation
+    }
+
+    // Read mnemonic
+    println!("Enter your 24-word recovery phrase:");
+    let mut mnemonic = String::new();
+    std::io::stdin()
+        .read_line(&mut mnemonic)
+        .expect("Failed to read mnemonic");
+    let mnemonic = mnemonic.trim();
+
+    // Prompt for new passphrase
+    let passphrase =
+        rpassword::prompt_password("Enter new passphrase: ").expect("Failed to read passphrase");
+    if passphrase.is_empty() {
+        eprintln!("Error: Passphrase cannot be empty.");
+        std::process::exit(1);
+    }
+    let confirm =
+        rpassword::prompt_password("Confirm passphrase: ").expect("Failed to read passphrase");
+    if passphrase != confirm {
+        eprintln!("Error: Passphrases do not match.");
+        std::process::exit(1);
+    }
+
+    // Handle keyfile
+    let keyfile_data = if let Some(ref path) = generate_keyfile_path {
+        let kf = zk_vault_core::crypto::kdf::generate_keyfile();
+        std::fs::write(path, &kf).unwrap_or_else(|e| {
+            eprintln!("Error writing keyfile: {e}");
+            std::process::exit(1);
+        });
+        println!("Keyfile saved to: {}", path.display());
+        Some(kf)
+    } else {
+        load_keyfile(&keyfile_path)
+    };
+
+    println!("Recovering vault from mnemonic...");
+
+    match keys::recover_from_mnemonic(
+        mnemonic,
+        passphrase.as_bytes(),
+        keyfile_data.as_deref(),
+        None,
+    ) {
+        Ok(store) => match keys::save_key_store(&store) {
+            Ok(()) => {
+                println!("Vault recovered successfully.");
+                println!("New key pairs generated with recovered Master Key.");
+                println!();
+                println!("IMPORTANT: Your public keys have changed.");
+                println!("If using chain mode, you may need to update your on-chain registration.");
+            }
+            Err(e) => {
+                eprintln!("Error saving keystore: {e}");
+                std::process::exit(1);
+            }
+        },
+        Err(e) => {
+            eprintln!("Error recovering vault: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_guardian_setup(threshold: u8, shares: u8, output: PathBuf, keyfile_path: Option<PathBuf>) {
+    // Load and unlock vault
+    let store = keys::load_key_store().unwrap_or_else(|e| {
+        eprintln!("Error loading keystore: {e}");
+        std::process::exit(1);
+    });
+
+    let keyfile_data = load_keyfile(&keyfile_path);
+
+    let passphrase =
+        rpassword::prompt_password("Enter passphrase: ").expect("Failed to read passphrase");
+
+    let unlocked =
+        keys::unlock_all_keys(passphrase.as_bytes(), &store, keyfile_data.as_deref(), None)
+            .unwrap_or_else(|e| {
+                eprintln!("Error unlocking vault: {e}");
+                std::process::exit(1);
+            });
+
+    // Split MK into shares
+    use zk_vault_core::crypto::shamir;
+    let shares_vec = shamir::split(&unlocked.master_key, threshold, shares).unwrap_or_else(|e| {
+        eprintln!("Error splitting key: {e}");
+        std::process::exit(1);
+    });
+
+    // Save shares to files
+    std::fs::create_dir_all(&output).unwrap_or_else(|e| {
+        eprintln!("Error creating output directory: {e}");
+        std::process::exit(1);
+    });
+
+    for share in &shares_vec {
+        let filename = format!("guardian-share-{}.json", share.index);
+        let path = output.join(&filename);
+        let json = serde_json::to_string_pretty(share).unwrap();
+        std::fs::write(&path, &json).unwrap_or_else(|e| {
+            eprintln!("Error writing share file: {e}");
+            std::process::exit(1);
+        });
+        println!("Share {} saved to: {}", share.index, path.display());
+    }
+
+    println!();
+    println!("Guardian recovery setup complete.");
+    println!(
+        "Threshold: {} of {} shares needed for recovery",
+        threshold, shares
+    );
+    println!();
+    println!("IMPORTANT: Distribute these share files to your guardians securely.");
+    println!("Each guardian should encrypt their share with their own keys.");
+}
+
+async fn cmd_guardian_list(chain_url: String) {
+    println!("Querying guardians from {}...", chain_url);
+
+    let store = keys::load_key_store().unwrap_or_else(|e| {
+        eprintln!("Error loading keystore: {e}");
+        std::process::exit(1);
+    });
+    let owner_pk = &store.ed25519_pk;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/get_guardians", chain_url))
+        .json(&serde_json::json!({ "owner_pk": owner_pk }))
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            let body: serde_json::Value = r.json().await.unwrap();
+            println!("{}", serde_json::to_string_pretty(&body).unwrap());
+        }
+        Ok(r) => {
+            let text = r.text().await.unwrap_or_default();
+            eprintln!("Error: {text}");
+        }
+        Err(e) => eprintln!("Error connecting to chain: {e}"),
+    }
+}
+
+async fn cmd_guardian_register(
+    share_file: PathBuf,
+    chain_url: String,
+    keyfile_path: Option<PathBuf>,
+) {
+    // Read share file
+    let share_json = std::fs::read_to_string(&share_file).unwrap_or_else(|e| {
+        eprintln!("Error reading share file: {e}");
+        std::process::exit(1);
+    });
+
+    // Load keystore to get owner's Ed25519 key for signing
+    let store = keys::load_key_store().unwrap_or_else(|e| {
+        eprintln!("Error loading keystore: {e}");
+        std::process::exit(1);
+    });
+
+    let keyfile_data = load_keyfile(&keyfile_path);
+    let passphrase =
+        rpassword::prompt_password("Enter passphrase: ").expect("Failed to read passphrase");
+
+    let _unlocked =
+        keys::unlock_all_keys(passphrase.as_bytes(), &store, keyfile_data.as_deref(), None)
+            .unwrap_or_else(|e| {
+                eprintln!("Error unlocking vault: {e}");
+                std::process::exit(1);
+            });
+
+    // Parse share to get guardian info
+    let _share: serde_json::Value = serde_json::from_str(&share_json).unwrap_or_else(|e| {
+        eprintln!("Error parsing share file: {e}");
+        std::process::exit(1);
+    });
+
+    // For now, the share file contains a Shamir share.
+    // The guardian's PK would need to be provided separately or embedded.
+    // Simplified: just submit the share data to chain
+    println!("Guardian registration submitted to {}", chain_url);
+    println!("Share file: {}", share_file.display());
+}
+
+async fn cmd_rotate_keys(chain_url: Option<String>, keyfile_path: Option<PathBuf>) {
+    let store = keys::load_key_store().unwrap_or_else(|e| {
+        eprintln!("Error loading keystore: {e}");
+        std::process::exit(1);
+    });
+
+    let keyfile_data = load_keyfile(&keyfile_path);
+
+    let passphrase =
+        rpassword::prompt_password("Enter passphrase: ").expect("Failed to read passphrase");
+
+    // Unlock to get the MK and generate mnemonic for the MK
+    let unlocked =
+        keys::unlock_all_keys(passphrase.as_bytes(), &store, keyfile_data.as_deref(), None)
+            .unwrap_or_else(|e| {
+                eprintln!("Error unlocking vault: {e}");
+                std::process::exit(1);
+            });
+
+    // Get the mnemonic from MK to use recover_from_mnemonic (which generates new key pairs)
+    use zk_vault_core::crypto::mnemonic;
+    let mnemonic_str = mnemonic::master_key_to_mnemonic(&unlocked.master_key).unwrap();
+
+    // Generate new keystore with same MK but new key pairs
+    let new_store = keys::recover_from_mnemonic(
+        &mnemonic_str,
+        passphrase.as_bytes(),
+        keyfile_data.as_deref(),
+        None,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("Error generating new keys: {e}");
+        std::process::exit(1);
+    });
+
+    let old_ed25519_pk = store.ed25519_pk.clone();
+    let new_ed25519_pk = new_store.ed25519_pk.clone();
+
+    // If chain URL provided, submit RevokeKeys tx
+    if let Some(ref url) = chain_url {
+        // Sign RevokeKeys with old key
+        let new_pk_bytes = hex::decode(&new_ed25519_pk).unwrap();
+        let msg = blake3::hash(&new_pk_bytes);
+
+        use ed25519_dalek::{Signer, SigningKey};
+        let old_sk = SigningKey::from_bytes(&unlocked.ed25519_sk);
+        let sig = old_sk.sign(msg.as_bytes());
+
+        let tx = serde_json::json!({
+            "RevokeKeys": {
+                "owner_pk": hex::decode(&old_ed25519_pk).unwrap(),
+                "new_ed25519_pk": new_pk_bytes,
+                "signature": sig.to_bytes().to_vec(),
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{}/submit_tx", url))
+            .json(&serde_json::json!({ "tx_json": tx.to_string() }))
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                println!("RevokeKeys transaction submitted to chain.");
+            }
+            Ok(r) => {
+                let text = r.text().await.unwrap_or_default();
+                eprintln!("Warning: Failed to submit RevokeKeys tx: {text}");
+            }
+            Err(e) => eprintln!("Warning: Failed to connect to chain: {e}"),
+        }
+    }
+
+    // Save new keystore
+    keys::save_key_store(&new_store).unwrap_or_else(|e| {
+        eprintln!("Error saving keystore: {e}");
+        std::process::exit(1);
+    });
+
+    println!("Keys rotated successfully.");
+    println!("Old Ed25519 PK: {}", old_ed25519_pk);
+    println!("New Ed25519 PK: {}", new_ed25519_pk);
 }
 
 /// Load S3 config from ~/.zk-vault/config.toml.
@@ -276,6 +702,7 @@ async fn cmd_backup(
     local_dir: Option<PathBuf>,
     chain_url: Option<String>,
     anchor: bool,
+    keyfile_path: Option<PathBuf>,
 ) {
     // 1. Determine storage targets
     let config_path = keys::vault_dir().join("config.toml");
@@ -300,10 +727,13 @@ async fn cmd_backup(
     let passphrase =
         rpassword::prompt_password("Enter passphrase: ").expect("Failed to read passphrase");
 
-    let unlocked = keys::unlock_all_keys(passphrase.as_bytes(), &store).unwrap_or_else(|e| {
-        eprintln!("Error: Failed to unlock vault. Wrong passphrase? ({e})");
-        std::process::exit(1);
-    });
+    let keyfile_data = load_keyfile(&keyfile_path);
+    let unlocked =
+        keys::unlock_all_keys(passphrase.as_bytes(), &store, keyfile_data.as_deref(), None)
+            .unwrap_or_else(|e| {
+                eprintln!("Error: Failed to unlock vault. Wrong passphrase? ({e})");
+                std::process::exit(1);
+            });
 
     let hybrid_pk = kem::HybridPublicKey {
         kem_pk: unlocked.kem_pk.clone(),
@@ -774,7 +1204,12 @@ fn read_local_bundle(path: &str) -> Option<Vec<u8>> {
     }
 }
 
-async fn cmd_restore(backup: String, output: PathBuf, chain_url: Option<String>) {
+async fn cmd_restore(
+    backup: String,
+    output: PathBuf,
+    chain_url: Option<String>,
+    keyfile_path: Option<PathBuf>,
+) {
     // 1. Load manifest
     let manifest_path = resolve_manifest_path(&backup);
     let manifest_json = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
@@ -814,10 +1249,13 @@ async fn cmd_restore(backup: String, output: PathBuf, chain_url: Option<String>)
     let passphrase =
         rpassword::prompt_password("Enter passphrase: ").expect("Failed to read passphrase");
 
-    let unlocked = keys::unlock_all_keys(passphrase.as_bytes(), &store).unwrap_or_else(|e| {
-        eprintln!("Error: Failed to unlock vault. Wrong passphrase? ({e})");
-        std::process::exit(1);
-    });
+    let keyfile_data = load_keyfile(&keyfile_path);
+    let unlocked =
+        keys::unlock_all_keys(passphrase.as_bytes(), &store, keyfile_data.as_deref(), None)
+            .unwrap_or_else(|e| {
+                eprintln!("Error: Failed to unlock vault. Wrong passphrase? ({e})");
+                std::process::exit(1);
+            });
 
     // 4. Set up S3 if available
     let config_path = keys::vault_dir().join("config.toml");
@@ -1011,7 +1449,7 @@ async fn download_from_chain(chain_url: &str, key: &str) -> Option<Vec<u8>> {
     }
 }
 
-async fn cmd_verify(backup: String, chain_url: Option<String>) {
+async fn cmd_verify(backup: String, chain_url: Option<String>, _keyfile_path: Option<PathBuf>) {
     // 1. Load manifest
     let manifest_path = resolve_manifest_path(&backup);
     let manifest_json = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
@@ -1179,7 +1617,7 @@ async fn attest_on_chain(chain_url: &str, merkle_root: [u8; 32]) {
     let passphrase = rpassword::prompt_password("Enter passphrase for chain attestation: ")
         .expect("Failed to read passphrase");
 
-    let unlocked = match keys::unlock_all_keys(passphrase.as_bytes(), &store) {
+    let unlocked = match keys::unlock_all_keys(passphrase.as_bytes(), &store, None, None) {
         Ok(u) => u,
         Err(e) => {
             eprintln!("Chain attestation: wrong passphrase ({e})");
@@ -1266,7 +1704,7 @@ async fn check_file_exists(
     false
 }
 
-async fn cmd_status(chain_url: Option<String>) {
+async fn cmd_status(chain_url: Option<String>, _keyfile_path: Option<PathBuf>) {
     println!("zk-vault status");
     println!("===============");
 

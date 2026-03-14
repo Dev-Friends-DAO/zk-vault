@@ -113,6 +113,21 @@ async fn main() {
     println!("# Super Merkle Tree for anchoring");
     println!("curl -s {addr}/anchor_status | jq");
     println!();
+    println!("# Query guardians");
+    println!(
+        r#"curl -s -X POST {addr}/get_guardians -H 'Content-Type: application/json' -d '{{"owner_pk":"..."}}' | jq"#
+    );
+    println!();
+    println!("# Query recovery status");
+    println!(
+        r#"curl -s -X POST {addr}/get_recovery_status -H 'Content-Type: application/json' -d '{{"owner_pk":"..."}}' | jq"#
+    );
+    println!();
+    println!("# Query key status");
+    println!(
+        r#"curl -s -X POST {addr}/get_key_status -H 'Content-Type: application/json' -d '{{"owner_pk":"..."}}' | jq"#
+    );
+    println!();
     println!("=========================================");
     println!();
 

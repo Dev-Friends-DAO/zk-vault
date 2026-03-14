@@ -22,7 +22,7 @@ No existing project combines all of zk-vault's pillars. The closest competitors 
 | Layer 0 (local-first) | **Always independent** | No | No | No | No | No |
 | BTC + ETH anchoring | **Dual-chain Merkle root** | Babylon (chain-level) | No | No | No | No |
 | Endowment (pay-once) | **On-chain module** | Prepaid subscription | Yes | No | No (deals expire) | Yes |
-| Guardian recovery | **Shamir + MPC + ZKP** | No | No | No | No | No |
+| Guardian recovery | **Shamir SSS + PQ KEM encryption** | No | No | No | No | No |
 | ZKP (STARK, PQ-safe) | **Planned (risc0)** | No | No | No | zk-SNARKs (not PQ) | No |
 | Migration path | **Mode A→B/C, no re-encrypt** | No | No | No | No | No |
 
@@ -100,7 +100,7 @@ Personal Mode is fully functional on its own. Chain Mode adds guarantees that ar
 | Storage verification | Trust the provider | BFT / Filecoin PoSt |
 | Data integrity proof | Local hash chain | BTC/ETH anchoring |
 | Single point of failure | Provider + local | None |
-| Key recovery | Unrecoverable if lost | Guardian network |
+| Key recovery | Mnemonic (24-word) | Mnemonic + Guardian network |
 | Permanent storage | Provider-dependent | Endowment model |
 | Multi-device sync | Manual | Chain state |
 
@@ -134,19 +134,23 @@ Post-quantum hybrid encryption — secure against both classical and quantum att
 ### Key Hierarchy
 
 ```
-User Passphrase (never leaves client)
+User Passphrase + [optional keyfile] + [optional hardware key]
     |
-    v  Argon2id (t=3, m=256MB, p=4)
+    v  Argon2id (t=3, m=256MB, p=4) + BLAKE3 factor mixing
 Passphrase-Derived Key (PDK)
     |
-    +-- Master Key (MK) -- 256-bit random, client-side
-    |     +-- ML-KEM-768 secret key
-    |     +-- X25519 secret key
-    |     +-- ML-DSA-65 secret key
-    |     +-- Ed25519 secret key
-    |     +-- Per-backup DEKs via HKDF
+    v  PDK encrypts only MK
+Master Key (MK) -- 256-bit random, client-side
     |
-    +-- Authentication credentials
+    +-- ML-KEM-768 secret key       -- encrypted by MK
+    +-- X25519 secret key            -- encrypted by MK
+    +-- ML-DSA-65 secret key         -- encrypted by MK
+    +-- Ed25519 secret key           -- encrypted by MK
+    +-- Per-backup DEKs via HKDF     -- derived from MK
+
+Recovery:
+    +-- 24-word BIP-39 mnemonic (encodes MK, generated at init)
+    +-- Guardian Shamir SSS (MK split into shares, 3-of-5 default)
 ```
 
 ### Per-File Encryption
@@ -197,9 +201,11 @@ All users' roots are batched into a single Super Merkle Tree, so one transaction
 | Validator compromise | Zero-knowledge architecture: ciphertext only |
 | Storage single point of failure | Mode A: provider + Layer 0 / Chain Mode: Mode B + Mode C + Layer 0 |
 | Data tampering | Merkle tree + BTC/ETH anchoring |
-| Passphrase brute force | Argon2id (256MB memory-hard) |
+| Passphrase brute force | Argon2id (256MB memory-hard) + optional keyfile + optional hardware key |
 | Memory dump | `zeroize` on all key material |
-| Passphrase loss | Guardian recovery network |
+| Passphrase loss | Mnemonic recovery (Mode A) or guardian network (Mode B/C) |
+| Device theft (Mode A) | Argon2id is sole defense; keys cannot be revoked |
+| Device theft (Mode B/C) | `RevokeKeys` tx invalidates old keys on chain |
 | Chain failure | Layer 0 is always independent |
 
 ## Resource Impact
@@ -231,6 +237,8 @@ See [docs/PRODUCT.md](docs/PRODUCT.md) for the full impact analysis.
 | Hashing | `blake3` |
 | KDF | `argon2` (Argon2id) |
 | Memory safety | `zeroize` |
+| Mnemonic recovery | `bip39` (BIP-39 24-word phrases) |
+| Shamir SSS | `sharks` (Shamir Secret Sharing over GF(256)) |
 | BFT Consensus | `malachitebft` (Informal Systems) |
 | HTTP Server | `axum` |
 | S3 Storage | `rust-s3` |
@@ -254,7 +262,7 @@ zk-vault/
 
 ```bash
 cargo build --workspace          # build all crates
-cargo test --workspace           # all tests (131 total)
+cargo test --workspace           # all tests (157 total)
 cargo clippy --workspace -- -D warnings
 cargo fmt
 ```

@@ -1,9 +1,12 @@
 pub mod aead;
 pub mod bundle;
+pub mod guardian;
 pub mod hash;
 pub mod kdf;
 pub mod kem;
 pub mod keys;
+pub mod mnemonic;
 pub mod sensitive;
+pub mod shamir;
 pub mod sign;
 pub mod streaming;

@@ -16,13 +16,32 @@ cargo build -p zk-vault-cli --release
 Generate post-quantum + classical key pairs and create a new vault.
 
 ```bash
-zk-vault init
+zk-vault init [--generate-keyfile <PATH>] [--keyfile <PATH>]
 ```
+
+| Flag | Description |
+|---|---|
+| `--generate-keyfile <PATH>` | Generate a 64-byte random keyfile and save to the given path (permissions set to 0400) |
+| `--keyfile <PATH>` | Use an existing keyfile for PDK derivation |
 
 - Prompts for a passphrase (used to encrypt the master key via Argon2id)
 - Generates: ML-KEM-768, X25519, ML-DSA-65, Ed25519 key pairs
-- Saves keystore to `~/.zk-vault/keystore.json`
+- Generates and displays a **24-word BIP-39 mnemonic** that encodes the master key (store this offline for recovery)
+- If `--generate-keyfile`: creates a random keyfile and mixes it into PDK derivation via BLAKE3
+- If `--keyfile`: reads the keyfile and mixes it into PDK derivation via BLAKE3
+- Saves keystore (v2 format) to `~/.zk-vault/keystore.json`
 - Fails if vault already exists (remove keystore to reinitialize)
+
+```bash
+# Basic init
+zk-vault init
+
+# Init with keyfile generation (two-factor: passphrase + keyfile)
+zk-vault init --generate-keyfile ~/zk-vault.key
+
+# Init with existing keyfile
+zk-vault init --keyfile ~/my-existing.key
+```
 
 ### `zk-vault backup`
 
@@ -36,6 +55,7 @@ zk-vault backup [OPTIONS] <PATHS>...
 |---|---|
 | `--local <DIR>` | Save encrypted backups to a local directory (Layer 0) |
 | `--chain <URL>` | Register backup on zk-vault chain (e.g., `http://localhost:3030`) |
+| `--keyfile <PATH>` | Path to keyfile for vault unlock (required if vault was created with a keyfile) |
 
 **Storage target combinations:**
 
@@ -75,7 +95,7 @@ Chain registration and upload are non-fatal — if the chain is unreachable, bac
 Decrypt and restore files from a backup.
 
 ```bash
-zk-vault restore <BACKUP> [-o <OUTPUT>] [--chain <URL>]
+zk-vault restore <BACKUP> [-o <OUTPUT>] [--chain <URL>] [--keyfile <PATH>]
 ```
 
 | Arg / Flag | Description |
@@ -83,6 +103,7 @@ zk-vault restore <BACKUP> [-o <OUTPUT>] [--chain <URL>]
 | `<BACKUP>` | Backup ID (UUID) or path to a manifest `.json` file |
 | `-o, --output <DIR>` | Output directory (default: `.`) |
 | `--chain <URL>` | Download from chain node (Mode B) (e.g., `http://localhost:3030`) |
+| `--keyfile <PATH>` | Path to keyfile for vault unlock |
 
 ```bash
 # Restore from local / S3
@@ -109,7 +130,7 @@ zk-vault restore ~/.zk-vault/manifests/019533a2-....json -o ./restored
 Verify backup integrity without decrypting.
 
 ```bash
-zk-vault verify <BACKUP> [--chain <URL>]
+zk-vault verify <BACKUP> [--chain <URL>] [--keyfile <PATH>]
 ```
 
 | # | Check | Description |
@@ -161,12 +182,124 @@ zk-vault backup --local ./backups --chain http://localhost:3030 --anchor ./my-da
 Show vault status: keys, storage config, and recent backups.
 
 ```bash
-zk-vault status [--chain <URL>]
+zk-vault status [--chain <URL>] [--keyfile <PATH>]
 ```
 
 Output: vault path, keystore version, public key fingerprints, S3 config, recent backups (up to 5).
 
 If `--chain`: also shows chain height, file count, validators, and cross-references local manifests with on-chain registration status.
+
+### `zk-vault recover`
+
+Recover a vault from a 24-word BIP-39 mnemonic phrase.
+
+```bash
+zk-vault recover [--keyfile <PATH>] [--generate-keyfile <PATH>]
+```
+
+| Flag | Description |
+|---|---|
+| `--keyfile <PATH>` | Use an existing keyfile for the recovered vault |
+| `--generate-keyfile <PATH>` | Generate a new keyfile for the recovered vault |
+
+- Prompts for the 24-word mnemonic phrase
+- Prompts for a new passphrase
+- Recovers the Master Key from the mnemonic
+- Generates fresh key pairs (ML-KEM-768, X25519, ML-DSA-65, Ed25519)
+- Encrypts new key pairs under the recovered MK
+- Saves new keystore to `~/.zk-vault/keystore.json`
+- Warns if an existing keystore will be overwritten
+
+```bash
+# Basic recovery
+zk-vault recover
+
+# Recovery with new keyfile
+zk-vault recover --generate-keyfile ~/new-vault.key
+```
+
+### `zk-vault guardian`
+
+Guardian recovery management commands.
+
+#### `zk-vault guardian setup`
+
+Split the Master Key into Shamir shares and encrypt each for a guardian.
+
+```bash
+zk-vault guardian setup [--threshold <K>] [--shares <N>] [--output <DIR>] [--keyfile <PATH>]
+```
+
+| Flag | Description |
+|---|---|
+| `--threshold <K>` | Number of shares required for recovery (default: 3) |
+| `--shares <N>` | Total number of shares to generate (default: 5) |
+| `--output <DIR>` | Directory to write encrypted share files (default: `.`) |
+| `--keyfile <PATH>` | Path to keyfile for vault unlock |
+
+- Unlocks the vault to access the Master Key
+- Splits MK into N Shamir shares (GF(256)) with threshold K
+- Encrypts each share using hybrid PQ KEM (ML-KEM-768 + X25519)
+- Writes one JSON file per share to the output directory
+- Each share file is intended for distribution to a specific guardian
+
+```bash
+# Default 3-of-5
+zk-vault guardian setup
+
+# Custom threshold
+zk-vault guardian setup --threshold 2 --shares 3 --output ./shares
+```
+
+#### `zk-vault guardian list`
+
+List registered guardians for the current user on chain.
+
+```bash
+zk-vault guardian list --chain <URL>
+```
+
+#### `zk-vault guardian register`
+
+Register a guardian's encrypted share on chain.
+
+```bash
+zk-vault guardian register --share-file <PATH> --chain <URL> [--keyfile <PATH>]
+```
+
+| Flag | Description |
+|---|---|
+| `--share-file <PATH>` | Path to the encrypted share JSON file |
+| `--chain <URL>` | Chain node URL |
+| `--keyfile <PATH>` | Path to keyfile for vault unlock |
+
+### `zk-vault rotate-keys`
+
+Generate new encryption and signing keys, re-encrypt the Master Key, and optionally submit a `RevokeKeys` transaction to the chain.
+
+```bash
+zk-vault rotate-keys [--chain <URL>] [--keyfile <PATH>]
+```
+
+| Flag | Description |
+|---|---|
+| `--chain <URL>` | Submit `RevokeKeys` tx to chain (marks old keys as revoked) |
+| `--keyfile <PATH>` | Path to keyfile for vault unlock |
+
+- Unlocks vault with current passphrase
+- Generates new ML-KEM-768, X25519, ML-DSA-65, Ed25519 key pairs
+- Generates new mnemonic for the new MK
+- Re-encrypts MK with the new PDK
+- If `--chain`: submits `RevokeKeys` tx to invalidate old keys on chain
+- Displays the new mnemonic (must be stored for future recovery)
+
+```bash
+# Local-only rotation (Mode A)
+zk-vault rotate-keys
+
+# Rotation with chain revocation (Mode B/C)
+zk-vault rotate-keys --chain http://localhost:3030
+```
 
 ---
 
@@ -323,6 +456,72 @@ curl -s localhost:3030/anchor_status | jq
 
 The `super_root` is the single 32-byte hash that gets anchored to BTC/ETH. One transaction covers all registered files.
 
+### POST /get_guardians
+
+Query the guardian set for an owner.
+
+```bash
+curl -s -X POST localhost:3030/get_guardians \
+  -H 'Content-Type: application/json' \
+  -d '{"owner_pk":"0102...64 hex chars..."}' | jq
+```
+
+```json
+{
+  "owner_pk": "0102...",
+  "guardians": [
+    { "guardian_pk": "aabb...", "share_index": 1 }
+  ],
+  "threshold": 3,
+  "registered_at": 5
+}
+```
+
+Errors: `400` (invalid hex), `404` (no guardian set for this owner).
+
+### POST /get_recovery_status
+
+Query the recovery request status for an owner.
+
+```bash
+curl -s -X POST localhost:3030/get_recovery_status \
+  -H 'Content-Type: application/json' \
+  -d '{"owner_pk":"0102...64 hex chars..."}' | jq
+```
+
+```json
+{
+  "owner_pk": "0102...",
+  "new_pk": "ccdd...",
+  "status": "Pending",
+  "approvals": 1,
+  "threshold": 3,
+  "requested_at": 10
+}
+```
+
+Errors: `400` (invalid hex), `404` (no recovery request for this owner).
+
+### POST /get_key_status
+
+Query the key status (current public key and revoked keys) for an owner.
+
+```bash
+curl -s -X POST localhost:3030/get_key_status \
+  -H 'Content-Type: application/json' \
+  -d '{"owner_pk":"0102...64 hex chars..."}' | jq
+```
+
+```json
+{
+  "current_pk": "eeff...",
+  "revoked_pks": ["0102..."],
+  "updated_at": 15
+}
+```
+
+Errors: `400` (invalid hex), `404` (no key entry for this owner).
+
 ### Transaction Types
 
 | Type | Fields | Description |
@@ -330,6 +529,10 @@ The `super_root` is the single 32-byte hash that gets anchored to BTC/ETH. One t
 | `RegisterFile` | `merkle_root`, `file_count`, `encrypted_size`, `owner_pk`, `signature` | Register a new backup on-chain |
 | `VerifyIntegrity` | `merkle_root`, `verifier_pk`, `signature` | Attest integrity of an existing backup |
 | `UpdateValidatorSet` | `validators`, `signature` | Governance: update the validator set |
+| `RegisterGuardian` | `owner_pk`, `guardian_pk`, `encrypted_share`, `threshold`, `signature` | Register a guardian with their PQ-encrypted Shamir share |
+| `RequestRecovery` | `owner_pk`, `new_pk`, `signature` | Initiate key recovery (requires guardian set) |
+| `ApproveRecovery` | `owner_pk`, `guardian_pk`, `share_data`, `signature` | Guardian approves recovery with decrypted share |
+| `RevokeKeys` | `owner_pk`, `new_pk`, `signature` | Revoke current keys and register new ones |
 
 ---
 
@@ -397,9 +600,9 @@ cargo build -p zk-vault-cli --release      # release binary
 ### Test
 
 ```bash
-cargo test --workspace                     # all tests (131 total)
-cargo test -p zk-vault-core               # core: 60 tests
-cargo test -p zk-vault-chain              # chain: 71 tests (62 unit + 9 integration)
+cargo test --workspace                     # all tests (157 total)
+cargo test -p zk-vault-core               # core: 81 tests
+cargo test -p zk-vault-chain              # chain: 76 tests (67 unit + 9 integration)
 cargo test -p zk-vault-chain --lib        # chain unit tests only
 cargo test -p zk-vault-chain --test integration  # chain integration tests only
 cargo test -p zk-vault-cli               # CLI tests

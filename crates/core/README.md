@@ -1,6 +1,6 @@
 # zk-vault-core
 
-Core cryptographic library for zk-vault: post-quantum encryption, key management, Merkle trees, manifests, storage backends, and anchoring.
+Core cryptographic library for zk-vault: post-quantum encryption, key management, mnemonic recovery, Shamir Secret Sharing, guardian encryption, Merkle trees, manifests, storage backends, and anchoring.
 
 ## Modules
 
@@ -12,8 +12,11 @@ zk-vault-core/
 │   ├── hash.rs        # BLAKE3 hashing, keyed hash, key derivation
 │   ├── kdf.rs         # Argon2id passphrase → PDK derivation
 │   ├── kem.rs         # Hybrid KEM (ML-KEM-768 + X25519) encapsulate / decapsulate
-│   ├── keys.rs        # Key generation, keystore (encrypt/save/load/unlock)
+│   ├── guardian.rs    # Hybrid PQ KEM encryption of Shamir shares for guardians
+│   ├── keys.rs        # Key generation, keystore v2 (PDK→MK→individual keys), mnemonic recovery
+│   ├── mnemonic.rs    # BIP-39 24-word mnemonic ↔ master key encoding
 │   ├── sensitive.rs   # Zeroize-on-drop wrappers for sensitive data
+│   ├── shamir.rs      # Shamir Secret Sharing over GF(256) (split/reconstruct)
 │   ├── sign.rs        # Hybrid signatures (ML-DSA-65 + Ed25519)
 │   └── streaming.rs   # Chunked encryption for large files (64 KiB chunks)
 ├── merkle/
@@ -40,10 +43,13 @@ zk-vault-core/
 | `crypto::aead` | XChaCha20-Poly1305 encrypt/decrypt with AAD |
 | `crypto::bundle` | Serialization format for encrypted files |
 | `crypto::hash` | BLAKE3 hashing (hash, keyed_hash, derive_key) |
-| `crypto::kdf` | Argon2id (t=3, m=256MB, p=4) passphrase derivation |
+| `crypto::guardian` | Hybrid PQ KEM encryption of Shamir shares for guardians (`encrypt_share_for_guardian`, `decrypt_guardian_share`) |
+| `crypto::kdf` | Argon2id (t=3, m=256MB, p=4) passphrase derivation + optional keyfile/hwkey mixing via BLAKE3 |
 | `crypto::kem` | Hybrid KEM: ML-KEM-768 + X25519 → wrapping key → wrap/unwrap symmetric key |
-| `crypto::keys` | Key generation (4 key pairs), keystore persistence, unlock with passphrase |
+| `crypto::keys` | Key generation (4 key pairs), keystore v2 (PDK→MK→individual keys), mnemonic recovery, keyfile/hwkey support |
+| `crypto::mnemonic` | BIP-39 24-word mnemonic encoding/decoding of master key (`master_key_to_mnemonic`, `mnemonic_to_master_key`) |
 | `crypto::sensitive` | `SensitiveBytes32` / `SensitiveVec` with `Zeroize` on drop |
+| `crypto::shamir` | Shamir Secret Sharing over GF(256): `split(secret, threshold, total)` and `reconstruct(shares, threshold)` |
 | `crypto::sign` | Hybrid signatures: ML-DSA-65 + Ed25519 |
 | `crypto::streaming` | Large-file chunked encryption (nonce XOR chunk_index, truncation-resistant AAD) |
 | `merkle::tree` | BLAKE3 Merkle tree from leaf hashes |
@@ -69,11 +75,24 @@ zk-vault-core/
 | Hashing | BLAKE3 (`blake3`) |
 | KDF | Argon2id (`argon2`) |
 | Memory safety | `zeroize` on all key material |
+| Mnemonic | BIP-39 (`bip39`) |
+| Shamir SSS | `sharks` (GF(256)) |
+
+### Key Hierarchy (v2)
+
+PDK encrypts only the Master Key. MK individually encrypts each secret key. This ensures that recovering MK (via mnemonic or Shamir reconstruction) is sufficient to recover all keys.
+
+```
+Passphrase + [keyfile] + [hwkey] → Argon2id + BLAKE3 → PDK
+PDK → encrypts → MK
+MK → encrypts → { ML-KEM-768 sk, X25519 sk, ML-DSA-65 sk, Ed25519 sk }
+MK → derives  → per-backup DEKs via HKDF
+```
 
 ## Tests
 
 ```bash
-# Run all core tests (60 tests)
+# Run all core tests (81 tests)
 cargo test -p zk-vault-core
 
 # With output

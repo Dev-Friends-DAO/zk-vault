@@ -269,18 +269,31 @@ If any hash mismatches, the exact point of corruption is identified.
 ```
 User Passphrase (never leaves client)
     |
-    v  Argon2id (t=3, m=256MB, p=4)
+    +-- [optional] Keyfile (64 random bytes, mixed via BLAKE3)
+    +-- [optional] Hardware key (YubiKey HMAC-SHA256, architecture-level)
+    |
+    v  Argon2id (t=3, m=256MB, p=4) + BLAKE3(argon2_output || keyfile || hwkey)
 Passphrase-Derived Key (PDK)
     |
-    +-- Master Key (MK) -- 256-bit random, generated client-side
-    |     +-- ML-KEM-768 secret key  (post-quantum KEM)
-    |     +-- X25519 secret key      (classical KEM)
-    |     +-- ML-DSA-65 secret key   (post-quantum signatures)
-    |     +-- Ed25519 secret key     (classical signatures)
-    |     +-- Per-backup DEKs via HKDF
+    v  AEAD encrypt/decrypt (PDK protects only MK)
+Master Key (MK) -- 256-bit random, generated client-side
     |
-    +-- Authentication credentials
+    +-- ML-KEM-768 secret key  (post-quantum KEM)      -- encrypted by MK
+    +-- X25519 secret key      (classical KEM)          -- encrypted by MK
+    +-- ML-DSA-65 secret key   (post-quantum signatures)-- encrypted by MK
+    +-- Ed25519 secret key     (classical signatures)   -- encrypted by MK
+    +-- Per-backup DEKs via HKDF                        -- derived from MK
+
+Recovery paths:
+    +-- Mnemonic (24-word BIP-39) -- encodes MK directly, generated at init
+    +-- Guardian recovery (Shamir SSS) -- MK split into shares
 ```
+
+**Version 2 key store format:** PDK encrypts only the Master Key. MK individually encrypts each secret key. This ensures that recovering MK (via mnemonic or guardian Shamir reconstruction) is sufficient to recover all keys — fresh key pairs are generated and re-encrypted under the recovered MK.
+
+**Keyfile:** An optional 64-byte random file mixed into PDK derivation via `BLAKE3(argon2_output || keyfile_data)`. The keyfile hash is stored in the key store to enforce its presence on subsequent unlocks. Generated with `--generate-keyfile` at init or provided with `--keyfile`.
+
+**Hardware key:** Architecture supports an optional YubiKey HMAC-SHA256 response mixed into PDK derivation alongside the keyfile. Not yet implemented at the USB protocol level.
 
 ### Streaming Encryption
 
@@ -365,9 +378,11 @@ The specific BFT implementation (CometBFT, GRANDPA, or other) is to be determine
 | `UpdateStorageStatus` | Update file status (replicated, verified, expired) |
 | `RenewDeal` | Trigger or record a Filecoin deal renewal |
 | `AnchorMerkleRoot` | Record BTC/ETH anchor transaction IDs |
-| `RegisterGuardian` | Add a guardian to a user's recovery set |
+| `RegisterGuardian` | Add a guardian to a user's recovery set (with PQ-encrypted Shamir share) |
+| `RequestRecovery` | Initiate key recovery process (requires guardian set to exist) |
+| `ApproveRecovery` | Guardian approves recovery by submitting their decrypted share |
+| `RevokeKeys` | Revoke current keys and register new ones (key rotation) |
 | `GuardianLiveness` | Submit periodic liveness proof |
-| `InitiateRecovery` | Begin key recovery process |
 
 **BFT properties:**
 - Safety: no two honest validators decide on conflicting states
@@ -674,13 +689,93 @@ STARKs (via risc0 zkVM) are the most natural fit: quantum-resistant, and existin
 
 ## 8. Guardian Recovery
 
-> **Status: Brainstorming in progress. Design not finalized.**
+> **Status: Core implementation complete. Shamir SSS, guardian encryption, and chain transactions are implemented.**
 
 ### The problem
 
 If the user loses their passphrase, all data is permanently lost. This is the most critical UX vulnerability for a self-sovereign encryption system.
 
-### Concept: Guardian profiles
+### Recovery modes
+
+**Mode A: Mnemonic recovery (standalone, no chain required)**
+
+At vault initialization (`zk-vault init`), a 24-word BIP-39 mnemonic is generated that encodes the Master Key directly. The user stores this mnemonic offline (paper, steel plate, safety deposit box). Recovery regenerates fresh key pairs encrypted under the recovered MK with a new passphrase.
+
+```
+zk-vault recover
+  → Enter 24-word mnemonic
+  → Enter new passphrase
+  → Fresh key pairs generated, encrypted under recovered MK
+```
+
+**Mode B/C: Guardian recovery (chain-based, Shamir Secret Sharing)**
+
+The Master Key is split into N shares using Shamir Secret Sharing over GF(256), where any K shares can reconstruct the MK but fewer than K reveal nothing.
+
+Default configuration: **3-of-5** (threshold 3, total 5 shares).
+
+### Shamir Secret Sharing implementation
+
+```
+shamir::split(master_key, threshold=3, total=5)
+  → 5 shares, each containing (index, data[32])
+  → Polynomial evaluation over GF(256) per byte
+  → Any 3 shares → shamir::reconstruct() → master_key
+  → Fewer than 3 shares → zero information about master_key
+```
+
+### Guardian share encryption
+
+Each Shamir share is encrypted for its guardian using **hybrid post-quantum KEM encryption** (the same ML-KEM-768 + X25519 scheme used for file encryption):
+
+```
+For each guardian:
+  1. Serialize the Shamir share
+  2. Generate random symmetric key
+  3. AEAD-encrypt share data with symmetric key
+  4. Hybrid KEM encapsulate symmetric key with guardian's PQ public keys
+  5. Bundle: EncryptedGuardianShare { guardian_id, share_index, kem_ct, eph_pk, nonce, ciphertext }
+```
+
+Guardians cannot read each other's shares. The encryption is quantum-resistant.
+
+### Chain transactions
+
+Guardian recovery uses three on-chain transaction types:
+
+| Transaction | Purpose |
+|---|---|
+| `RegisterGuardian` | Register a guardian with their encrypted share and PQ public key |
+| `RequestRecovery` | Initiate recovery (requires guardian set to exist for the owner) |
+| `ApproveRecovery` | Guardian submits their decrypted share; when threshold is met, recovery completes |
+
+**Chain state:**
+- `guardian_registry`: `owner_pk → GuardianSet { guardians[], threshold, registered_at }`
+- `recovery_requests`: `owner_pk → RecoveryRequest { new_pk, status, approvals[], requested_at }`
+
+**Recovery flow:**
+
+```
+1. User sets up guardians:
+   zk-vault guardian setup --threshold 3 --shares 5
+   → Splits MK into 5 shares, encrypts each for a guardian
+   → Outputs share files (one per guardian)
+
+2. Guardians register on chain:
+   zk-vault guardian register --share-file ./share_1.json --chain http://...
+   → Submits RegisterGuardian tx
+
+3. Recovery initiated:
+   zk-vault recover (or someone submits RequestRecovery tx)
+   → Creates RecoveryRequest with Pending status
+
+4. Guardians approve:
+   Each guardian submits ApproveRecovery tx with their decrypted share
+   → When threshold approvals received → status = Completed
+   → MK can be reconstructed from the approved shares
+```
+
+### Guardian profiles
 
 **Solo Profile (no human relationships required):**
 
@@ -688,7 +783,7 @@ If the user loses their passphrase, all data is permanently lost. This is the mo
 3-of-5 guardians, all non-human:
   1. Hardware wallet A (e.g., Ledger, at home)
   2. Hardware wallet B (stored elsewhere)
-  3. FIDO2 security key
+  3. Separate device (phone/tablet)
   4. Time-locked smart contract (30-day delay)
   5. Knowledge proof (ZKP of secret answer)
 ```
@@ -704,9 +799,17 @@ If the user loses their passphrase, all data is permanently lost. This is the mo
   5. Knowledge proof
 ```
 
+### Device Theft / Key Revocation
+
+| Scenario | Mode A | Mode B/C |
+|---|---|---|
+| Device stolen | Argon2id is sole defense (256MB memory-hard KDF). Cannot revoke keys — attacker has unlimited offline time to brute-force. | Submit `RevokeKeys` tx to chain. Old keys are marked revoked; new keys registered. All chain operations reject the old keys. |
+| Key rotation | Generate new keys locally, re-encrypt MK. Old keys cannot be invalidated on-chain. | `zk-vault rotate-keys --chain http://...` generates new keys, submits `RevokeKeys` tx, and re-encrypts MK. |
+
+**`RevokeKeys` transaction:** Records the old public key as revoked and registers the new public key. The chain's `key_registry` tracks `current_pk` and `revoked_pks` per owner. All subsequent transactions (`RegisterFile`, `VerifyIntegrity`, etc.) reject signatures from revoked keys.
+
 ### Concepts under exploration
 
-- **Shamir Secret Sharing:** Master key split into N shares, any K can reconstruct
 - **MPC Recovery:** Guardians participate in multi-party computation; no single guardian ever sees the full key
 - **Time-lock Recovery:** Recovery request is posted on-chain; if the legitimate owner doesn't cancel within N days, the key is released
 - **Dead Man's Switch:** If the user doesn't check in for N days, recovery is automatically initiated
@@ -715,7 +818,7 @@ If the user loses their passphrase, all data is permanently lost. This is the mo
 ### Open questions
 
 - How to handle guardian key rotation?
-- What happens if guardians collude?
+- What happens if guardians collude? (Shamir threshold provides mathematical protection — need K colluders)
 - How to incentivize non-human guardians (hardware wallet availability)?
 - Should there be a recovery-of-last-resort mechanism?
 
@@ -734,15 +837,19 @@ These are deliberately separated. Compromising one does not compromise the other
 
 #### Authentication Modules (User-Selectable)
 
-| Method | Mode A | Mode B/C | Description |
-|---|---|---|---|
-| **Passphrase** | Default | Available | User-chosen passphrase → Argon2id → PDK |
-| **Passkey / Biometrics** | Available | Available | FIDO2/WebAuthn via device Secure Enclave (Face ID, fingerprint, hardware key). No chain required — runs locally on device. |
-| **Session Key** | — | Available | Time-limited key with restricted permissions (e.g., backup-only, 24h expiry). Avoids repeated passphrase entry. |
-| **Social Recovery** | — | Available | Guardian-based account recovery (see Section 8). |
-| **External Wallet** | — | Available | Existing wallet (e.g., MetaMask) for chain authentication. |
+| Method | Mode A | Mode B/C | Status | Description |
+|---|---|---|---|---|
+| **Passphrase** | Default | Available | Implemented | User-chosen passphrase → Argon2id → PDK |
+| **Keyfile** | Available | Available | Implemented | 64-byte random file mixed into PDK via BLAKE3. Generated with `--generate-keyfile` or provided with `--keyfile`. |
+| **Hardware Key** | Available | Available | Architecture only | YubiKey HMAC-SHA256 response mixed into PDK derivation. USB-level integration not yet implemented. |
+| **Mnemonic Recovery** | Available | Available | Implemented | 24-word BIP-39 mnemonic encodes MK directly. Generated at init. |
+| **Guardian Recovery** | — | Available | Implemented | Shamir SSS + PQ-encrypted shares + chain coordination (see Section 8). |
+| **Session Key** | — | Available | Planned | Time-limited key with restricted permissions (e.g., backup-only, 24h expiry). |
+| **External Wallet** | — | Available | Planned | Existing wallet (e.g., MetaMask) for chain authentication. |
 
-Users choose their preferred method(s). Multiple methods can be active simultaneously (e.g., Passkey for daily use + passphrase as fallback + Guardian Recovery for emergencies).
+**Why not Passkey / FIDO2 / WebAuthn:** These protocols require a relying party (server) to store credential IDs and verify assertions. zk-vault's local-only model has no server to act as relying party. Passkeys are designed for web authentication, not local key derivation. The keyfile + hardware key approach achieves the same multi-factor security without requiring a server.
+
+Users choose their preferred method(s). Multiple methods can be active simultaneously (e.g., passphrase + keyfile for daily use + mnemonic as offline backup + guardian recovery for emergencies).
 
 #### Account Abstraction (Chain-Native)
 
@@ -894,9 +1001,11 @@ The decision to build in Rust has proven valuable:
 | Server/validator compromise | Zero-knowledge architecture: only ciphertext is stored |
 | Storage single point of failure | Mode B (multi-validator) + Mode C (multi-SP) + Layer 0 (local) |
 | Data tampering | Merkle tree + Bitcoin/Ethereum anchoring |
-| Passphrase brute force | Argon2id (256MB memory-hard KDF) |
+| Passphrase brute force | Argon2id (256MB memory-hard KDF) + optional keyfile + optional hardware key |
 | Memory dump attacks | `zeroize` crate for all key material |
-| Passphrase loss | Guardian recovery network |
+| Passphrase loss | Mnemonic recovery (Mode A) or guardian recovery network (Mode B/C) |
+| Device theft (Mode A) | Argon2id is sole defense; cannot revoke keys |
+| Device theft (Mode B/C) | `RevokeKeys` tx invalidates old keys on chain; Argon2id protects offline data |
 | Chain failure | Layer 0 (local backup) is always independent |
 | Filecoin deal expiry | Chain automates renewal; Mode B provides independent redundancy |
 | Token value collapse | Layer 0 survives all economic scenarios |

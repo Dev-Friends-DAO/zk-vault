@@ -122,6 +122,61 @@ pub struct SuperProofEntry {
     pub proof_hashes: Vec<String>,
 }
 
+/// Get guardians request.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetGuardiansRequest {
+    pub owner_pk: String,
+}
+
+/// Get guardians response.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetGuardiansResponse {
+    pub owner_pk: String,
+    pub threshold: u8,
+    pub total_guardians: u8,
+    pub guardian_count: usize,
+    pub guardians: Vec<GuardianInfo>,
+}
+
+/// Guardian info in response.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GuardianInfo {
+    pub guardian_pk: String,
+    pub registered_at: u64,
+}
+
+/// Get recovery status request.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetRecoveryStatusRequest {
+    pub owner_pk: String,
+}
+
+/// Get recovery status response.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetRecoveryStatusResponse {
+    pub owner_pk: String,
+    pub status: String,
+    pub new_pk: String,
+    pub requested_at: u64,
+    pub approval_count: usize,
+    pub threshold: u8,
+}
+
+/// Get key status request.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetKeyStatusRequest {
+    pub owner_pk: String,
+}
+
+/// Get key status response.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetKeyStatusResponse {
+    pub owner_pk: String,
+    pub current_pk: String,
+    pub revoked_count: usize,
+    pub last_rotated: u64,
+}
+
 /// Generic error response.
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
@@ -142,6 +197,9 @@ pub fn router(node: SharedNode) -> Router {
         .route("/list_data", get(handle_list_data))
         .route("/anchor_status", get(handle_anchor_status))
         .route("/health", get(handle_health))
+        .route("/get_guardians", post(handle_get_guardians))
+        .route("/get_recovery_status", post(handle_get_recovery_status))
+        .route("/get_key_status", post(handle_get_key_status))
         .with_state(node)
 }
 
@@ -368,6 +426,128 @@ async fn handle_anchor_status(State(node): State<SharedNode>) -> Json<AnchorStat
         super_root: super_root.map(hex::encode),
         user_proofs,
     })
+}
+
+/// Parse a hex-encoded 32-byte public key from a request string.
+fn parse_pk(hex_str: &str) -> Result<[u8; 32], (StatusCode, Json<ErrorResponse>)> {
+    let bytes = hex::decode(hex_str).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Invalid hex: {e}"),
+            }),
+        )
+    })?;
+    if bytes.len() != 32 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!(
+                    "Public key must be 32 bytes (64 hex chars), got {}",
+                    bytes.len()
+                ),
+            }),
+        ));
+    }
+    let mut pk = [0u8; 32];
+    pk.copy_from_slice(&bytes);
+    Ok(pk)
+}
+
+async fn handle_get_guardians(
+    State(node): State<SharedNode>,
+    Json(req): Json<GetGuardiansRequest>,
+) -> Result<Json<GetGuardiansResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let owner_pk = parse_pk(&req.owner_pk)?;
+
+    let node = node.lock().unwrap();
+    let gs = node.get_guardians(&owner_pk).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("No guardian set found for {}", req.owner_pk),
+            }),
+        )
+    })?;
+
+    let guardians: Vec<GuardianInfo> = gs
+        .guardians
+        .iter()
+        .map(|g| GuardianInfo {
+            guardian_pk: hex::encode(g.guardian_pk),
+            registered_at: g.registered_at.0,
+        })
+        .collect();
+
+    Ok(Json(GetGuardiansResponse {
+        owner_pk: req.owner_pk,
+        threshold: gs.threshold,
+        total_guardians: gs.total_guardians,
+        guardian_count: gs.guardians.len(),
+        guardians,
+    }))
+}
+
+async fn handle_get_recovery_status(
+    State(node): State<SharedNode>,
+    Json(req): Json<GetRecoveryStatusRequest>,
+) -> Result<Json<GetRecoveryStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let owner_pk = parse_pk(&req.owner_pk)?;
+
+    let node = node.lock().unwrap();
+    let rr = node.get_recovery_status(&owner_pk).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("No recovery request found for {}", req.owner_pk),
+            }),
+        )
+    })?;
+
+    let status_str = match &rr.status {
+        crate::state::RecoveryStatus::Pending => "Pending",
+        crate::state::RecoveryStatus::Completed => "Completed",
+        crate::state::RecoveryStatus::Cancelled => "Cancelled",
+    };
+
+    // Look up threshold from guardian registry
+    let threshold = node
+        .get_guardians(&owner_pk)
+        .map(|gs| gs.threshold)
+        .unwrap_or(0);
+
+    Ok(Json(GetRecoveryStatusResponse {
+        owner_pk: req.owner_pk,
+        status: status_str.to_string(),
+        new_pk: hex::encode(rr.new_pk),
+        requested_at: rr.requested_at.0,
+        approval_count: rr.approvals.len(),
+        threshold,
+    }))
+}
+
+async fn handle_get_key_status(
+    State(node): State<SharedNode>,
+    Json(req): Json<GetKeyStatusRequest>,
+) -> Result<Json<GetKeyStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let owner_pk = parse_pk(&req.owner_pk)?;
+
+    let node = node.lock().unwrap();
+    let ke = node.get_key_status(&owner_pk).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("No key entry found for {}", req.owner_pk),
+            }),
+        )
+    })?;
+
+    Ok(Json(GetKeyStatusResponse {
+        owner_pk: req.owner_pk,
+        current_pk: hex::encode(ke.current_pk),
+        revoked_count: ke.revoked_pks.len(),
+        last_rotated: ke.last_rotated.0,
+    }))
 }
 
 async fn handle_list_data(State(node): State<SharedNode>) -> Json<ListDataResponse> {
