@@ -7,6 +7,10 @@
 //! - "guardians": guardian registry
 //! - "recovery": recovery requests
 //! - "keys": key registry (revocation tracking)
+//!
+//! Chain state is persisted atomically using RocksDB `WriteBatch`.
+//! This guarantees that either all changes from a block commit are
+//! written, or none are — making the storage crash-safe.
 
 use std::path::Path;
 
@@ -349,26 +353,58 @@ impl Storage {
 
     // ── Bulk save (after apply_block) ──
 
-    /// Save the full chain state to RocksDB. Called after each block commit.
+    /// Save the full chain state to RocksDB atomically using WriteBatch.
+    /// Either all changes are persisted or none (crash-safe).
     pub fn save_chain_state(&self, state: &crate::state::ChainState) -> Result<()> {
-        // Save metadata
-        self.save_height(state.height)?;
-        self.save_last_block_id(&state.last_block_id)?;
-        self.save_validator_set(&state.validator_set)?;
+        use rocksdb::WriteBatch;
 
-        // Save registries (full overwrite per entry)
+        let mut batch = WriteBatch::default();
+
+        // Metadata
+        batch.put(META_HEIGHT, state.height.0.to_le_bytes());
+        batch.put(META_LAST_BLOCK_ID, state.last_block_id.as_bytes());
+        let vs_json = serde_json::to_vec(&state.validator_set)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        batch.put(META_VALIDATOR_SET, vs_json);
+
+        // File registry
+        let cf_files = self.db.cf_handle(CF_FILES).unwrap();
         for (root, entry) in &state.file_registry {
-            self.put_file(root, entry)?;
+            let key = hex::encode(root);
+            let value = serde_json::to_vec(entry)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            batch.put_cf(&cf_files, key.as_bytes(), value);
         }
+
+        // Guardian registry
+        let cf_guardians = self.db.cf_handle(CF_GUARDIANS).unwrap();
         for (pk, set) in &state.guardian_registry {
-            self.put_guardian_set(pk, set)?;
+            let key = hex::encode(pk);
+            let value =
+                serde_json::to_vec(set).map_err(|e| StorageError::Serialization(e.to_string()))?;
+            batch.put_cf(&cf_guardians, key.as_bytes(), value);
         }
+
+        // Recovery requests
+        let cf_recovery = self.db.cf_handle(CF_RECOVERY).unwrap();
         for (pk, req) in &state.recovery_requests {
-            self.put_recovery_request(pk, req)?;
+            let key = hex::encode(pk);
+            let value =
+                serde_json::to_vec(req).map_err(|e| StorageError::Serialization(e.to_string()))?;
+            batch.put_cf(&cf_recovery, key.as_bytes(), value);
         }
+
+        // Key registry
+        let cf_keys = self.db.cf_handle(CF_KEYS).unwrap();
         for (pk, entry) in &state.key_registry {
-            self.put_key_entry(pk, entry)?;
+            let key = hex::encode(pk);
+            let value = serde_json::to_vec(entry)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            batch.put_cf(&cf_keys, key.as_bytes(), value);
         }
+
+        // Atomic write
+        self.db.write(batch)?;
 
         Ok(())
     }
@@ -509,5 +545,44 @@ mod tests {
         let (storage, _dir) = open_temp_storage();
         assert!(storage.load_chain_state().unwrap().is_none());
         assert!(storage.load_height().unwrap().is_none());
+    }
+
+    #[test]
+    fn save_chain_state_is_atomic() {
+        let (storage, _dir) = open_temp_storage();
+
+        let validators = vec![Validator::new([1u8; 32], 100)];
+        let vs = ValidatorSet::new(validators);
+        let mut state = crate::state::ChainState::genesis(vs);
+
+        // Add multiple entries across different registries
+        state.file_registry.insert(
+            [0xAA; 32],
+            FileEntry {
+                owner_pk: [1u8; 32],
+                file_count: 1,
+                encrypted_size: 100,
+                registered_at: Height(1),
+                verifications: BTreeSet::new(),
+            },
+        );
+        state.file_registry.insert(
+            [0xBB; 32],
+            FileEntry {
+                owner_pk: [2u8; 32],
+                file_count: 2,
+                encrypted_size: 200,
+                registered_at: Height(1),
+                verifications: BTreeSet::new(),
+            },
+        );
+
+        // Save atomically
+        storage.save_chain_state(&state).unwrap();
+
+        // Verify all entries persisted
+        let loaded = storage.load_chain_state().unwrap().unwrap();
+        assert_eq!(loaded.file_registry.len(), 2);
+        assert_eq!(loaded.height, state.height);
     }
 }

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use zk_vault_core::crypto::{aead, bundle, hash, kem, keys};
@@ -8,6 +9,126 @@ use zk_vault_core::manifest::{ManifestBuilder, ManifestFileEntry, StorageLocatio
 use zk_vault_core::merkle::tree::MerkleTree;
 use zk_vault_core::storage::s3::{S3Backend, S3Config};
 use zk_vault_core::storage::StorageBackend;
+
+// ---------------------------------------------------------------------------
+// Error helpers
+// ---------------------------------------------------------------------------
+
+/// Print error message and exit. Used for unrecoverable CLI errors.
+fn fatal(msg: &str) -> ! {
+    eprintln!("Error: {msg}");
+    std::process::exit(1);
+}
+
+/// Print error with context and exit.
+fn fatal_with(context: &str, err: impl std::fmt::Display) -> ! {
+    eprintln!("Error: {context}: {err}");
+    std::process::exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// Config file integration
+// ---------------------------------------------------------------------------
+
+/// Vault configuration loaded from ~/.zk-vault/config.toml
+#[derive(Debug, Default)]
+struct VaultConfig {
+    keyfile_path: Option<PathBuf>,
+    chain_url: Option<String>,
+}
+
+fn load_vault_config() -> VaultConfig {
+    let config_path = keys::vault_dir().join("config.toml");
+    if !config_path.exists() {
+        return VaultConfig::default();
+    }
+
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => return VaultConfig::default(),
+    };
+
+    let config: toml::Value = match toml::from_str(&content) {
+        Ok(c) => c,
+        Err(_) => return VaultConfig::default(),
+    };
+
+    let keyfile_path = config
+        .get("vault")
+        .and_then(|v| v.get("keyfile_path"))
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+
+    let chain_url = config
+        .get("vault")
+        .and_then(|v| v.get("chain_url"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    VaultConfig {
+        keyfile_path,
+        chain_url,
+    }
+}
+
+/// Resolve keyfile: CLI flag takes priority, then config.toml
+fn resolve_keyfile(cli_keyfile: &Option<PathBuf>) -> Option<Vec<u8>> {
+    let config = load_vault_config();
+    let effective_path = cli_keyfile.as_ref().or(config.keyfile_path.as_ref());
+    load_keyfile_from_path(effective_path)
+}
+
+fn load_keyfile_from_path(path: Option<&PathBuf>) -> Option<Vec<u8>> {
+    path.map(|p| {
+        std::fs::read(p)
+            .unwrap_or_else(|e| fatal_with(&format!("reading keyfile {}", p.display()), e))
+    })
+}
+
+/// Resolve chain URL: CLI flag takes priority, then config.toml
+fn resolve_chain_url(cli_chain: &Option<String>) -> Option<String> {
+    if cli_chain.is_some() {
+        return cli_chain.clone();
+    }
+    load_vault_config().chain_url
+}
+
+// ---------------------------------------------------------------------------
+// Common unlock helpers
+// ---------------------------------------------------------------------------
+
+/// Load keystore and unlock all keys. Common operation for most commands.
+fn unlock_vault(keyfile: &Option<PathBuf>) -> keys::UnlockedKeys {
+    let store = keys::load_key_store().unwrap_or_else(|e| fatal_with("loading keystore", e));
+
+    let keyfile_data = resolve_keyfile(keyfile);
+
+    let passphrase = rpassword::prompt_password("Enter passphrase: ")
+        .unwrap_or_else(|e| fatal_with("reading passphrase", e));
+
+    keys::unlock_all_keys(passphrase.as_bytes(), &store, keyfile_data.as_deref(), None)
+        .unwrap_or_else(|e| fatal_with("unlocking vault", e))
+}
+
+/// Load keystore, unlock, and return both store and keys.
+fn load_and_unlock(keyfile: &Option<PathBuf>) -> (keys::EncryptedKeyStore, keys::UnlockedKeys) {
+    let store = keys::load_key_store().unwrap_or_else(|e| fatal_with("loading keystore", e));
+
+    let keyfile_data = resolve_keyfile(keyfile);
+
+    let passphrase = rpassword::prompt_password("Enter passphrase: ")
+        .unwrap_or_else(|e| fatal_with("reading passphrase", e));
+
+    let unlocked =
+        keys::unlock_all_keys(passphrase.as_bytes(), &store, keyfile_data.as_deref(), None)
+            .unwrap_or_else(|e| fatal_with("unlocking vault", e));
+
+    (store, unlocked)
+}
+
+// ---------------------------------------------------------------------------
+// CLI definition
+// ---------------------------------------------------------------------------
 
 #[derive(Parser)]
 #[command(name = "zk-vault")]
@@ -139,18 +260,18 @@ enum GuardianAction {
     },
     /// List registered guardians on chain
     List {
-        /// Chain node URL
+        /// Chain node URL (falls back to config.toml vault.chain_url)
         #[arg(long)]
-        chain: String,
+        chain: Option<String>,
     },
     /// Register guardians on chain (after setup)
     Register {
         /// Path to an encrypted share file
         #[arg(long)]
         share_file: PathBuf,
-        /// Chain node URL
+        /// Chain node URL (falls back to config.toml vault.chain_url)
         #[arg(long)]
-        chain: String,
+        chain: Option<String>,
         /// Path to keyfile for vault unlock
         #[arg(long)]
         keyfile: Option<PathBuf>,
@@ -162,7 +283,7 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "zk_vault=info".parse().unwrap()),
+                .unwrap_or_else(|_| "zk_vault=info,zk_vault_cli=info".parse().unwrap()),
         )
         .init();
 
@@ -215,54 +336,48 @@ async fn main() {
     }
 }
 
+/// Legacy keyfile loader — delegates to load_keyfile_from_path.
 fn load_keyfile(path: &Option<PathBuf>) -> Option<Vec<u8>> {
-    path.as_ref().map(|p| {
-        std::fs::read(p).unwrap_or_else(|e| {
-            eprintln!("Error reading keyfile {}: {e}", p.display());
-            std::process::exit(1);
-        })
-    })
+    load_keyfile_from_path(path.as_ref())
 }
 
 fn cmd_init(generate_keyfile: Option<PathBuf>, keyfile_path: Option<PathBuf>) {
     // Check if vault already exists
     let keystore_path = keys::keystore_path();
     if keystore_path.exists() {
-        eprintln!("Error: Vault already exists at {}", keystore_path.display());
-        eprintln!("To reinitialize, remove the existing keystore first.");
-        std::process::exit(1);
+        fatal(&format!(
+            "Vault already exists at {}. To reinitialize, remove the existing keystore first.",
+            keystore_path.display()
+        ));
     }
 
     // Prompt for passphrase
     let passphrase = rpassword::prompt_password("Enter passphrase for new vault: ")
-        .expect("Failed to read passphrase");
+        .unwrap_or_else(|e| fatal_with("reading passphrase", e));
 
     if passphrase.is_empty() {
-        eprintln!("Error: Passphrase cannot be empty.");
-        std::process::exit(1);
+        fatal("Passphrase cannot be empty.");
     }
 
-    let confirm =
-        rpassword::prompt_password("Confirm passphrase: ").expect("Failed to read passphrase");
+    let confirm = rpassword::prompt_password("Confirm passphrase: ")
+        .unwrap_or_else(|e| fatal_with("reading passphrase", e));
 
     if passphrase != confirm {
-        eprintln!("Error: Passphrases do not match.");
-        std::process::exit(1);
+        fatal("Passphrases do not match.");
     }
 
     // Handle keyfile generation or loading
     let keyfile_data = if let Some(ref gen_path) = generate_keyfile {
         let kf = zk_vault_core::crypto::kdf::generate_keyfile();
         std::fs::write(gen_path, &kf).unwrap_or_else(|e| {
-            eprintln!("Error writing keyfile to {}: {e}", gen_path.display());
-            std::process::exit(1);
+            fatal_with(&format!("writing keyfile to {}", gen_path.display()), e)
         });
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(gen_path, std::fs::Permissions::from_mode(0o400))
                 .unwrap_or_else(|e| {
-                    eprintln!("Warning: Could not set keyfile permissions: {e}");
+                    warn!("Could not set keyfile permissions: {e}");
                 });
         }
         println!("Keyfile generated: {}", gen_path.display());
@@ -273,46 +388,43 @@ fn cmd_init(generate_keyfile: Option<PathBuf>, keyfile_path: Option<PathBuf>) {
 
     println!("Generating post-quantum key pairs (this may take a moment)...");
 
-    match keys::generate_key_store(passphrase.as_bytes(), keyfile_data.as_deref(), None) {
-        Ok((store, mnemonic)) => match keys::save_key_store(&store) {
-            Ok(()) => {
-                println!("Vault initialized successfully.");
-                println!("Keystore saved to: {}", keystore_path.display());
-                println!();
-                println!("Key pairs generated:");
-                println!("  - ML-KEM-768   (post-quantum key encapsulation)");
-                println!("  - X25519       (classical key exchange)");
-                println!("  - ML-DSA-65    (post-quantum signatures)");
-                println!("  - Ed25519      (classical signatures)");
-                println!();
-                println!("RECOVERY MNEMONIC (write this down and store securely):");
-                println!("  {mnemonic}");
-                println!();
-                println!("IMPORTANT: Remember your passphrase. The mnemonic above can");
-                println!("recover your master key if you forget your passphrase.");
-            }
-            Err(e) => {
-                eprintln!("Error saving keystore: {e}");
-                std::process::exit(1);
-            }
-        },
-        Err(e) => {
-            eprintln!("Error generating keys: {e}");
-            std::process::exit(1);
-        }
-    }
+    let (store, mnemonic) =
+        keys::generate_key_store(passphrase.as_bytes(), keyfile_data.as_deref(), None)
+            .unwrap_or_else(|e| fatal_with("generating keys", e));
+
+    keys::save_key_store(&store).unwrap_or_else(|e| fatal_with("saving keystore", e));
+
+    info!("Vault initialized at {}", keystore_path.display());
+
+    println!("Vault initialized successfully.");
+    println!("Keystore saved to: {}", keystore_path.display());
+    println!();
+    println!("Key pairs generated:");
+    println!("  - ML-KEM-768   (post-quantum key encapsulation)");
+    println!("  - X25519       (classical key exchange)");
+    println!("  - ML-DSA-65    (post-quantum signatures)");
+    println!("  - Ed25519      (classical signatures)");
+    println!();
+    println!("RECOVERY MNEMONIC (write this down and store securely):");
+    println!("  {mnemonic}");
+    println!();
+    println!("IMPORTANT: Remember your passphrase. The mnemonic above can");
+    println!("recover your master key if you forget your passphrase.");
 }
 
 fn cmd_recover(keyfile_path: Option<PathBuf>, generate_keyfile_path: Option<PathBuf>) {
     // Check vault doesn't exist (or offer to overwrite)
     let keystore_path = keys::keystore_path();
     if keystore_path.exists() {
+        warn!(
+            "Vault already exists at {}, recovery will overwrite",
+            keystore_path.display()
+        );
         eprintln!(
             "Warning: Vault already exists at {}",
             keystore_path.display()
         );
         eprintln!("Recovery will overwrite the existing keystore.");
-        // In a real app, prompt for confirmation
     }
 
     // Read mnemonic
@@ -320,30 +432,25 @@ fn cmd_recover(keyfile_path: Option<PathBuf>, generate_keyfile_path: Option<Path
     let mut mnemonic = String::new();
     std::io::stdin()
         .read_line(&mut mnemonic)
-        .expect("Failed to read mnemonic");
+        .unwrap_or_else(|e| fatal_with("reading mnemonic", e));
     let mnemonic = mnemonic.trim();
 
     // Prompt for new passphrase
-    let passphrase =
-        rpassword::prompt_password("Enter new passphrase: ").expect("Failed to read passphrase");
+    let passphrase = rpassword::prompt_password("Enter new passphrase: ")
+        .unwrap_or_else(|e| fatal_with("reading passphrase", e));
     if passphrase.is_empty() {
-        eprintln!("Error: Passphrase cannot be empty.");
-        std::process::exit(1);
+        fatal("Passphrase cannot be empty.");
     }
-    let confirm =
-        rpassword::prompt_password("Confirm passphrase: ").expect("Failed to read passphrase");
+    let confirm = rpassword::prompt_password("Confirm passphrase: ")
+        .unwrap_or_else(|e| fatal_with("reading passphrase", e));
     if passphrase != confirm {
-        eprintln!("Error: Passphrases do not match.");
-        std::process::exit(1);
+        fatal("Passphrases do not match.");
     }
 
     // Handle keyfile
     let keyfile_data = if let Some(ref path) = generate_keyfile_path {
         let kf = zk_vault_core::crypto::kdf::generate_keyfile();
-        std::fs::write(path, &kf).unwrap_or_else(|e| {
-            eprintln!("Error writing keyfile: {e}");
-            std::process::exit(1);
-        });
+        std::fs::write(path, &kf).unwrap_or_else(|e| fatal_with("writing keyfile", e));
         println!("Keyfile saved to: {}", path.display());
         Some(kf)
     } else {
@@ -352,72 +459,40 @@ fn cmd_recover(keyfile_path: Option<PathBuf>, generate_keyfile_path: Option<Path
 
     println!("Recovering vault from mnemonic...");
 
-    match keys::recover_from_mnemonic(
+    let store = keys::recover_from_mnemonic(
         mnemonic,
         passphrase.as_bytes(),
         keyfile_data.as_deref(),
         None,
-    ) {
-        Ok(store) => match keys::save_key_store(&store) {
-            Ok(()) => {
-                println!("Vault recovered successfully.");
-                println!("New key pairs generated with recovered Master Key.");
-                println!();
-                println!("IMPORTANT: Your public keys have changed.");
-                println!("If using chain mode, you may need to update your on-chain registration.");
-            }
-            Err(e) => {
-                eprintln!("Error saving keystore: {e}");
-                std::process::exit(1);
-            }
-        },
-        Err(e) => {
-            eprintln!("Error recovering vault: {e}");
-            std::process::exit(1);
-        }
-    }
+    )
+    .unwrap_or_else(|e| fatal_with("recovering vault", e));
+
+    keys::save_key_store(&store).unwrap_or_else(|e| fatal_with("saving keystore", e));
+
+    info!("Vault recovered successfully");
+    println!("Vault recovered successfully.");
+    println!("New key pairs generated with recovered Master Key.");
+    println!();
+    println!("IMPORTANT: Your public keys have changed.");
+    println!("If using chain mode, you may need to update your on-chain registration.");
 }
 
 fn cmd_guardian_setup(threshold: u8, shares: u8, output: PathBuf, keyfile_path: Option<PathBuf>) {
-    // Load and unlock vault
-    let store = keys::load_key_store().unwrap_or_else(|e| {
-        eprintln!("Error loading keystore: {e}");
-        std::process::exit(1);
-    });
-
-    let keyfile_data = load_keyfile(&keyfile_path);
-
-    let passphrase =
-        rpassword::prompt_password("Enter passphrase: ").expect("Failed to read passphrase");
-
-    let unlocked =
-        keys::unlock_all_keys(passphrase.as_bytes(), &store, keyfile_data.as_deref(), None)
-            .unwrap_or_else(|e| {
-                eprintln!("Error unlocking vault: {e}");
-                std::process::exit(1);
-            });
+    let unlocked = unlock_vault(&keyfile_path);
 
     // Split MK into shares
     use zk_vault_core::crypto::shamir;
-    let shares_vec = shamir::split(&unlocked.master_key, threshold, shares).unwrap_or_else(|e| {
-        eprintln!("Error splitting key: {e}");
-        std::process::exit(1);
-    });
+    let shares_vec = shamir::split(&unlocked.master_key, threshold, shares)
+        .unwrap_or_else(|e| fatal_with("splitting key", e));
 
     // Save shares to files
-    std::fs::create_dir_all(&output).unwrap_or_else(|e| {
-        eprintln!("Error creating output directory: {e}");
-        std::process::exit(1);
-    });
+    std::fs::create_dir_all(&output).unwrap_or_else(|e| fatal_with("creating output directory", e));
 
     for share in &shares_vec {
         let filename = format!("guardian-share-{}.json", share.index);
         let path = output.join(&filename);
         let json = serde_json::to_string_pretty(share).unwrap();
-        std::fs::write(&path, &json).unwrap_or_else(|e| {
-            eprintln!("Error writing share file: {e}");
-            std::process::exit(1);
-        });
+        std::fs::write(&path, &json).unwrap_or_else(|e| fatal_with("writing share file", e));
         println!("Share {} saved to: {}", share.index, path.display());
     }
 
@@ -432,13 +507,14 @@ fn cmd_guardian_setup(threshold: u8, shares: u8, output: PathBuf, keyfile_path: 
     println!("Each guardian should encrypt their share with their own keys.");
 }
 
-async fn cmd_guardian_list(chain_url: String) {
+async fn cmd_guardian_list(chain_url_arg: Option<String>) {
+    let chain_url = resolve_chain_url(&chain_url_arg)
+        .unwrap_or_else(|| fatal("--chain is required (or set vault.chain_url in config.toml)"));
+
+    info!(chain = %chain_url, "Querying guardians");
     println!("Querying guardians from {}...", chain_url);
 
-    let store = keys::load_key_store().unwrap_or_else(|e| {
-        eprintln!("Error loading keystore: {e}");
-        std::process::exit(1);
-    });
+    let store = keys::load_key_store().unwrap_or_else(|e| fatal_with("loading keystore", e));
     let owner_pk = &store.ed25519_pk;
 
     let client = reqwest::Client::new();
@@ -455,71 +531,56 @@ async fn cmd_guardian_list(chain_url: String) {
         }
         Ok(r) => {
             let text = r.text().await.unwrap_or_default();
+            error!(response = %text, "Guardian list query failed");
             eprintln!("Error: {text}");
         }
-        Err(e) => eprintln!("Error connecting to chain: {e}"),
+        Err(e) => {
+            error!(err = %e, "Failed to connect to chain");
+            eprintln!("Error connecting to chain: {e}");
+        }
     }
 }
 
 async fn cmd_guardian_register(
     share_file: PathBuf,
-    chain_url: String,
+    chain_url_arg: Option<String>,
     keyfile_path: Option<PathBuf>,
 ) {
+    let chain_url = resolve_chain_url(&chain_url_arg)
+        .unwrap_or_else(|| fatal("--chain is required (or set vault.chain_url in config.toml)"));
+
     // Read share file
-    let share_json = std::fs::read_to_string(&share_file).unwrap_or_else(|e| {
-        eprintln!("Error reading share file: {e}");
-        std::process::exit(1);
-    });
+    let share_json = std::fs::read_to_string(&share_file)
+        .unwrap_or_else(|e| fatal_with("reading share file", e));
 
-    // Load keystore to get owner's Ed25519 key for signing
-    let store = keys::load_key_store().unwrap_or_else(|e| {
-        eprintln!("Error loading keystore: {e}");
-        std::process::exit(1);
-    });
-
-    let keyfile_data = load_keyfile(&keyfile_path);
-    let passphrase =
-        rpassword::prompt_password("Enter passphrase: ").expect("Failed to read passphrase");
-
-    let _unlocked =
-        keys::unlock_all_keys(passphrase.as_bytes(), &store, keyfile_data.as_deref(), None)
-            .unwrap_or_else(|e| {
-                eprintln!("Error unlocking vault: {e}");
-                std::process::exit(1);
-            });
+    // Load keystore and unlock
+    let (_store, _unlocked) = load_and_unlock(&keyfile_path);
 
     // Parse share to get guardian info
-    let _share: serde_json::Value = serde_json::from_str(&share_json).unwrap_or_else(|e| {
-        eprintln!("Error parsing share file: {e}");
-        std::process::exit(1);
-    });
+    let _share: serde_json::Value =
+        serde_json::from_str(&share_json).unwrap_or_else(|e| fatal_with("parsing share file", e));
 
     // For now, the share file contains a Shamir share.
     // The guardian's PK would need to be provided separately or embedded.
     // Simplified: just submit the share data to chain
+    info!(chain = %chain_url, share_file = %share_file.display(), "Guardian registration submitted");
     println!("Guardian registration submitted to {}", chain_url);
     println!("Share file: {}", share_file.display());
 }
 
 async fn cmd_rotate_keys(chain_url: Option<String>, keyfile_path: Option<PathBuf>) {
-    let store = keys::load_key_store().unwrap_or_else(|e| {
-        eprintln!("Error loading keystore: {e}");
-        std::process::exit(1);
-    });
+    let effective_chain = resolve_chain_url(&chain_url);
+    let keyfile_data = resolve_keyfile(&keyfile_path);
 
-    let keyfile_data = load_keyfile(&keyfile_path);
+    let store = keys::load_key_store().unwrap_or_else(|e| fatal_with("loading keystore", e));
 
-    let passphrase =
-        rpassword::prompt_password("Enter passphrase: ").expect("Failed to read passphrase");
+    let passphrase = rpassword::prompt_password("Enter passphrase: ")
+        .unwrap_or_else(|e| fatal_with("reading passphrase", e));
 
     // Unlock to get the MK and generate mnemonic for the MK
     let unlocked =
         keys::unlock_all_keys(passphrase.as_bytes(), &store, keyfile_data.as_deref(), None)
-            .unwrap_or_else(|e| {
-                eprintln!("Error unlocking vault: {e}");
-                std::process::exit(1);
-            });
+            .unwrap_or_else(|e| fatal_with("unlocking vault", e));
 
     // Get the mnemonic from MK to use recover_from_mnemonic (which generates new key pairs)
     use zk_vault_core::crypto::mnemonic;
@@ -532,16 +593,13 @@ async fn cmd_rotate_keys(chain_url: Option<String>, keyfile_path: Option<PathBuf
         keyfile_data.as_deref(),
         None,
     )
-    .unwrap_or_else(|e| {
-        eprintln!("Error generating new keys: {e}");
-        std::process::exit(1);
-    });
+    .unwrap_or_else(|e| fatal_with("generating new keys", e));
 
     let old_ed25519_pk = store.ed25519_pk.clone();
     let new_ed25519_pk = new_store.ed25519_pk.clone();
 
     // If chain URL provided, submit RevokeKeys tx
-    if let Some(ref url) = chain_url {
+    if let Some(ref url) = effective_chain {
         // Sign RevokeKeys with old key
         let new_pk_bytes = hex::decode(&new_ed25519_pk).unwrap();
         let msg = blake3::hash(&new_pk_bytes);
@@ -578,11 +636,9 @@ async fn cmd_rotate_keys(chain_url: Option<String>, keyfile_path: Option<PathBuf
     }
 
     // Save new keystore
-    keys::save_key_store(&new_store).unwrap_or_else(|e| {
-        eprintln!("Error saving keystore: {e}");
-        std::process::exit(1);
-    });
+    keys::save_key_store(&new_store).unwrap_or_else(|e| fatal_with("saving keystore", e));
 
+    info!("Keys rotated successfully");
     println!("Keys rotated successfully.");
     println!("Old Ed25519 PK: {}", old_ed25519_pk);
     println!("New Ed25519 PK: {}", new_ed25519_pk);
@@ -592,37 +648,28 @@ async fn cmd_rotate_keys(chain_url: Option<String>, keyfile_path: Option<PathBuf
 fn load_s3_config() -> S3Config {
     let config_path = keys::vault_dir().join("config.toml");
     if !config_path.exists() {
-        eprintln!("Error: No config file found at {}", config_path.display());
-        eprintln!("Create it with S3 storage settings. See config.example.toml.");
-        std::process::exit(1);
+        fatal(&format!(
+            "No config file found at {}. Create it with S3 storage settings. See config.example.toml.",
+            config_path.display()
+        ));
     }
 
-    let content = std::fs::read_to_string(&config_path).unwrap_or_else(|e| {
-        eprintln!("Error reading config: {e}");
-        std::process::exit(1);
-    });
+    let content =
+        std::fs::read_to_string(&config_path).unwrap_or_else(|e| fatal_with("reading config", e));
 
-    let config: toml::Value = toml::from_str(&content).unwrap_or_else(|e| {
-        eprintln!("Error parsing config: {e}");
-        std::process::exit(1);
-    });
+    let config: toml::Value =
+        toml::from_str(&content).unwrap_or_else(|e| fatal_with("parsing config", e));
 
     let s3 = config
         .get("storage")
         .and_then(|s| s.get("s3"))
-        .unwrap_or_else(|| {
-            eprintln!("Error: [storage.s3] section missing in config.toml");
-            std::process::exit(1);
-        });
+        .unwrap_or_else(|| fatal("[storage.s3] section missing in config.toml"));
 
     S3Config {
         bucket: s3
             .get("bucket")
             .and_then(|v| v.as_str())
-            .unwrap_or_else(|| {
-                eprintln!("Error: storage.s3.bucket is required");
-                std::process::exit(1);
-            })
+            .unwrap_or_else(|| fatal("storage.s3.bucket is required"))
             .to_string(),
         region: s3
             .get("region")
@@ -705,35 +752,22 @@ async fn cmd_backup(
     keyfile_path: Option<PathBuf>,
 ) {
     // 1. Determine storage targets
+    let effective_chain = resolve_chain_url(&chain_url);
     let config_path = keys::vault_dir().join("config.toml");
     let use_s3 = config_path.exists();
     let use_local = local_dir.is_some();
 
-    let use_chain = chain_url.is_some();
+    let use_chain = effective_chain.is_some();
 
     if !use_s3 && !use_local && !use_chain {
-        eprintln!("Error: No storage target specified.");
-        eprintln!("Either create ~/.zk-vault/config.toml for S3, use --local <dir>, or use --chain <url>.");
-        std::process::exit(1);
+        fatal("No storage target specified. Either create ~/.zk-vault/config.toml for S3, use --local <dir>, or use --chain <url>.");
     }
 
-    // 2. Load keystore
-    let store = keys::load_key_store().unwrap_or_else(|e| {
-        eprintln!("Error: Cannot load vault. Run `zk-vault init` first. ({e})");
-        std::process::exit(1);
-    });
+    info!(files = paths.len(), "Starting backup");
 
-    // 3. Unlock keys
-    let passphrase =
-        rpassword::prompt_password("Enter passphrase: ").expect("Failed to read passphrase");
-
-    let keyfile_data = load_keyfile(&keyfile_path);
-    let unlocked =
-        keys::unlock_all_keys(passphrase.as_bytes(), &store, keyfile_data.as_deref(), None)
-            .unwrap_or_else(|e| {
-                eprintln!("Error: Failed to unlock vault. Wrong passphrase? ({e})");
-                std::process::exit(1);
-            });
+    // 2. Load keystore and unlock
+    let (store, unlocked) = load_and_unlock(&keyfile_path);
+    let _ = &store; // used for public key access if needed
 
     let hybrid_pk = kem::HybridPublicKey {
         kem_pk: unlocked.kem_pk.clone(),
@@ -743,29 +777,21 @@ async fn cmd_backup(
     // 4. Collect files
     let files = collect_files(&paths);
     if files.is_empty() {
-        eprintln!("No files found to back up.");
-        std::process::exit(1);
+        fatal("No files found to back up.");
     }
     println!("Found {} file(s) to back up.", files.len());
 
     // 5. Set up storage targets
     let s3_storage = if use_s3 {
         let s3_config = load_s3_config();
-        Some(S3Backend::new(&s3_config).unwrap_or_else(|e| {
-            eprintln!("Error: Failed to connect to S3: {e}");
-            std::process::exit(1);
-        }))
+        Some(S3Backend::new(&s3_config).unwrap_or_else(|e| fatal_with("connecting to S3", e)))
     } else {
         None
     };
 
     if let Some(dir) = &local_dir {
         std::fs::create_dir_all(dir).unwrap_or_else(|e| {
-            eprintln!(
-                "Error: Cannot create local output dir {}: {e}",
-                dir.display()
-            );
-            std::process::exit(1);
+            fatal_with(&format!("creating local output dir {}", dir.display()), e)
         });
     }
 
@@ -810,16 +836,11 @@ async fn cmd_backup(
         let file_id = Uuid::now_v7().to_string();
         let aad_str = format!("zk-vault:file:{user_id}:{file_id}");
         let (nonce, ciphertext) = aead::encrypt(&sym_key, &plaintext, aad_str.as_bytes())
-            .unwrap_or_else(|e| {
-                eprintln!("  Error encrypting {relative_path}: {e}");
-                std::process::exit(1);
-            });
+            .unwrap_or_else(|e| fatal_with(&format!("encrypting {relative_path}"), e));
 
         // Wrap symmetric key with hybrid KEM
-        let encap = kem::encapsulate(&hybrid_pk, &sym_key).unwrap_or_else(|e| {
-            eprintln!("  Error wrapping key for {relative_path}: {e}");
-            std::process::exit(1);
-        });
+        let encap = kem::encapsulate(&hybrid_pk, &sym_key)
+            .unwrap_or_else(|e| fatal_with(&format!("wrapping key for {relative_path}"), e));
 
         // Build encrypted bundle
         let encrypted_bundle = bundle::EncryptedBundle {
@@ -910,8 +931,7 @@ async fn cmd_backup(
     }
 
     if success_count == 0 {
-        eprintln!("No files were backed up successfully.");
-        std::process::exit(1);
+        fatal("No files were backed up successfully.");
     }
 
     // 7. Build Merkle tree
@@ -927,6 +947,7 @@ async fn cmd_backup(
     // 8. Save manifest locally
     match save_manifest(&manifest) {
         Ok(path) => {
+            info!(backup_id = %manifest.backup_id, files = success_count, bytes = total_bytes, "Backup complete");
             println!();
             println!("Backup complete.");
             println!("  Files:       {success_count}/{}", files.len());
@@ -936,13 +957,14 @@ async fn cmd_backup(
             println!("  Backup ID:   {}", manifest.backup_id);
         }
         Err(e) => {
+            warn!(err = %e, "Backup succeeded but manifest save failed");
             eprintln!("Warning: Backup succeeded but manifest save failed: {e}");
             eprintln!("Merkle root: {}", hex::encode(merkle_root));
         }
     }
 
-    // 9. Register on chain and upload data (if --chain was specified)
-    if let Some(chain_url) = chain_url {
+    // 9. Register on chain and upload data (if chain was resolved)
+    if let Some(chain_url) = effective_chain {
         register_on_chain(
             &chain_url,
             merkle_root,
@@ -1097,17 +1119,21 @@ async fn register_on_chain(
             if status.is_success() {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body_text) {
                     let tx_hash = parsed["tx_hash"].as_str().unwrap_or("?");
+                    info!(chain = %chain_url, tx_hash = %tx_hash, "Transaction submitted");
                     println!("  Chain registration: SUCCESS");
                     println!("  tx_hash: {tx_hash}");
                 } else {
+                    info!(chain = %chain_url, "Transaction submitted");
                     println!("  Chain registration: SUCCESS");
                 }
             } else {
+                error!(chain = %chain_url, status = %status, "Chain registration failed");
                 eprintln!("  Chain registration: FAILED (HTTP {status})");
                 eprintln!("  Response: {body_text}");
             }
         }
         Err(e) => {
+            error!(chain = %chain_url, err = %e, "Chain registration failed");
             eprintln!("  Chain registration: FAILED (connection error: {e})");
             eprintln!("  Backup data is safe. You can register later manually.");
         }
@@ -1185,13 +1211,10 @@ fn resolve_manifest_path(backup: &str) -> PathBuf {
         return manifest_path;
     }
 
-    eprintln!("Error: Cannot find manifest for '{backup}'.");
-    eprintln!("Provide a backup ID or path to a manifest file.");
-    eprintln!(
-        "Available manifests: {}",
+    fatal(&format!(
+        "Cannot find manifest for '{backup}'. Provide a backup ID or path to a manifest file. Available manifests: {}",
         keys::vault_dir().join("manifests").display()
-    );
-    std::process::exit(1);
+    ));
 }
 
 /// Read an encrypted bundle from a local file path.
@@ -1210,18 +1233,16 @@ async fn cmd_restore(
     chain_url: Option<String>,
     keyfile_path: Option<PathBuf>,
 ) {
+    let effective_chain = resolve_chain_url(&chain_url);
+
     // 1. Load manifest
     let manifest_path = resolve_manifest_path(&backup);
-    let manifest_json = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
-        eprintln!("Error reading manifest: {e}");
-        std::process::exit(1);
-    });
-    let manifest: zk_vault_core::manifest::BackupManifest = serde_json::from_str(&manifest_json)
-        .unwrap_or_else(|e| {
-            eprintln!("Error parsing manifest: {e}");
-            std::process::exit(1);
-        });
+    let manifest_json = std::fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|e| fatal_with("reading manifest", e));
+    let manifest: zk_vault_core::manifest::BackupManifest =
+        serde_json::from_str(&manifest_json).unwrap_or_else(|e| fatal_with("parsing manifest", e));
 
+    info!(backup_id = %manifest.backup_id, "Starting restore");
     println!("Restoring backup: {}", manifest.backup_id);
     println!("  Source:  {}", manifest.source);
     println!("  Files:   {}", manifest.file_count);
@@ -1230,32 +1251,12 @@ async fn cmd_restore(
     // 2. Verify manifest integrity
     match manifest.verify_integrity() {
         Ok(true) => println!("  Merkle root: verified"),
-        Ok(false) => {
-            eprintln!("Error: Manifest Merkle root mismatch. Data may be tampered.");
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("Error verifying manifest: {e}");
-            std::process::exit(1);
-        }
+        Ok(false) => fatal("Manifest Merkle root mismatch. Data may be tampered."),
+        Err(e) => fatal_with("verifying manifest", e),
     }
 
     // 3. Unlock keys
-    let store = keys::load_key_store().unwrap_or_else(|e| {
-        eprintln!("Error: Cannot load vault. ({e})");
-        std::process::exit(1);
-    });
-
-    let passphrase =
-        rpassword::prompt_password("Enter passphrase: ").expect("Failed to read passphrase");
-
-    let keyfile_data = load_keyfile(&keyfile_path);
-    let unlocked =
-        keys::unlock_all_keys(passphrase.as_bytes(), &store, keyfile_data.as_deref(), None)
-            .unwrap_or_else(|e| {
-                eprintln!("Error: Failed to unlock vault. Wrong passphrase? ({e})");
-                std::process::exit(1);
-            });
+    let (_store, unlocked) = load_and_unlock(&keyfile_path);
 
     // 4. Set up S3 if available
     let config_path = keys::vault_dir().join("config.toml");
@@ -1267,10 +1268,7 @@ async fn cmd_restore(
     };
 
     // 5. Create output directory
-    std::fs::create_dir_all(&output).unwrap_or_else(|e| {
-        eprintln!("Error creating output directory: {e}");
-        std::process::exit(1);
-    });
+    std::fs::create_dir_all(&output).unwrap_or_else(|e| fatal_with("creating output directory", e));
 
     // 6. Restore each file
     let mut restored = 0usize;
@@ -1281,7 +1279,7 @@ async fn cmd_restore(
         let source_path = &file_entry.source_path;
 
         // Try to download the encrypted bundle
-        let bundle_bytes = fetch_bundle(file_entry, &s3_storage, chain_url.as_deref()).await;
+        let bundle_bytes = fetch_bundle(file_entry, &s3_storage, effective_chain.as_deref()).await;
         let bundle_bytes = match bundle_bytes {
             Some(data) => data,
             None => {
@@ -1304,8 +1302,7 @@ async fn cmd_restore(
         // Decapsulate: recover per-file symmetric key
         let x25519_sk_bytes: [u8; 32] =
             unlocked.x25519_sk.clone().try_into().unwrap_or_else(|_| {
-                eprintln!("Error: Invalid X25519 secret key length");
-                std::process::exit(1);
+                fatal("Invalid X25519 secret key length");
             });
         let x25519_sk = kem::StaticSecret::from(x25519_sk_bytes);
         let sym_key = match kem::decapsulate(
@@ -1450,17 +1447,14 @@ async fn download_from_chain(chain_url: &str, key: &str) -> Option<Vec<u8>> {
 }
 
 async fn cmd_verify(backup: String, chain_url: Option<String>, _keyfile_path: Option<PathBuf>) {
+    let effective_chain = resolve_chain_url(&chain_url);
+
     // 1. Load manifest
     let manifest_path = resolve_manifest_path(&backup);
-    let manifest_json = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
-        eprintln!("Error reading manifest: {e}");
-        std::process::exit(1);
-    });
-    let manifest: zk_vault_core::manifest::BackupManifest = serde_json::from_str(&manifest_json)
-        .unwrap_or_else(|e| {
-            eprintln!("Error parsing manifest: {e}");
-            std::process::exit(1);
-        });
+    let manifest_json = std::fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|e| fatal_with("reading manifest", e));
+    let manifest: zk_vault_core::manifest::BackupManifest =
+        serde_json::from_str(&manifest_json).unwrap_or_else(|e| fatal_with("parsing manifest", e));
 
     println!("Verifying backup: {}", manifest.backup_id);
     println!("  Source:  {}", manifest.source);
@@ -1502,7 +1496,7 @@ async fn cmd_verify(backup: String, chain_url: Option<String>, _keyfile_path: Op
     let mut files_missing = 0u32;
 
     for file_entry in &manifest.files {
-        let found = check_file_exists(file_entry, &s3_storage, chain_url.as_deref()).await;
+        let found = check_file_exists(file_entry, &s3_storage, effective_chain.as_deref()).await;
         if found {
             files_available += 1;
         } else {
@@ -1528,7 +1522,7 @@ async fn cmd_verify(backup: String, chain_url: Option<String>, _keyfile_path: Op
     let mut hash_skip = 0u32;
 
     for file_entry in &manifest.files {
-        let bundle_bytes = fetch_bundle(file_entry, &s3_storage, chain_url.as_deref()).await;
+        let bundle_bytes = fetch_bundle(file_entry, &s3_storage, effective_chain.as_deref()).await;
         match bundle_bytes {
             Some(data) => {
                 // Verify bundle parses correctly
@@ -1592,7 +1586,7 @@ async fn cmd_verify(backup: String, chain_url: Option<String>, _keyfile_path: Op
     }
 
     // Submit VerifyIntegrity attestation to chain (only if all checks passed)
-    if let Some(chain_url) = chain_url {
+    if let Some(chain_url) = effective_chain {
         if all_passed {
             attest_on_chain(&chain_url, manifest.merkle_root).await;
         } else {
@@ -1705,6 +1699,7 @@ async fn check_file_exists(
 }
 
 async fn cmd_status(chain_url: Option<String>, _keyfile_path: Option<PathBuf>) {
+    let effective_chain = resolve_chain_url(&chain_url);
     println!("zk-vault status");
     println!("===============");
 
@@ -1813,8 +1808,8 @@ async fn cmd_status(chain_url: Option<String>, _keyfile_path: Option<PathBuf>) {
         println!("Backups: none");
     }
 
-    // 5. Chain status (if --chain was specified)
-    if let Some(chain_url) = chain_url {
+    // 5. Chain status (if chain was resolved)
+    if let Some(chain_url) = effective_chain {
         query_chain_status(&chain_url).await;
     }
 }
@@ -1929,21 +1924,15 @@ async fn cmd_anchor(backup: String, use_btc: bool, use_eth: bool) {
     use zk_vault_core::anchor::BlockchainAnchor;
 
     if !use_btc && !use_eth {
-        eprintln!("Error: Specify at least one anchor target: --btc and/or --eth");
-        std::process::exit(1);
+        fatal("Specify at least one anchor target: --btc and/or --eth");
     }
 
     // 1. Load manifest
     let manifest_path = resolve_manifest_path(&backup);
-    let manifest_json = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
-        eprintln!("Error reading manifest: {e}");
-        std::process::exit(1);
-    });
-    let manifest: zk_vault_core::manifest::BackupManifest = serde_json::from_str(&manifest_json)
-        .unwrap_or_else(|e| {
-            eprintln!("Error parsing manifest: {e}");
-            std::process::exit(1);
-        });
+    let manifest_json = std::fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|e| fatal_with("reading manifest", e));
+    let manifest: zk_vault_core::manifest::BackupManifest =
+        serde_json::from_str(&manifest_json).unwrap_or_else(|e| fatal_with("parsing manifest", e));
 
     let merkle_root = manifest.merkle_root;
     println!("Anchoring backup: {}", manifest.backup_id);
@@ -1951,28 +1940,21 @@ async fn cmd_anchor(backup: String, use_btc: bool, use_eth: bool) {
     println!();
 
     // 2. Load anchor config
-    let anchor_config = load_anchor_config().unwrap_or_else(|| {
-        eprintln!("Error: No [anchor] section in ~/.zk-vault/config.toml");
-        eprintln!("Add [anchor.bitcoin] and/or [anchor.ethereum] sections.");
-        std::process::exit(1);
-    });
+    let anchor_config = load_anchor_config()
+        .unwrap_or_else(|| fatal("No [anchor] section in ~/.zk-vault/config.toml. Add [anchor.bitcoin] and/or [anchor.ethereum] sections."));
 
     let mut receipts: Vec<zk_vault_core::anchor::AnchorReceipt> = Vec::new();
 
     // 3. Bitcoin anchoring
     if use_btc {
-        let btc_config = anchor_config.get("bitcoin").unwrap_or_else(|| {
-            eprintln!("Error: [anchor.bitcoin] section missing in config.toml");
-            std::process::exit(1);
-        });
+        let btc_config = anchor_config
+            .get("bitcoin")
+            .unwrap_or_else(|| fatal("[anchor.bitcoin] section missing in config.toml"));
 
         let api_url = btc_config
             .get("api_url")
             .and_then(|v| v.as_str())
-            .unwrap_or_else(|| {
-                eprintln!("Error: anchor.bitcoin.api_url is required");
-                std::process::exit(1);
-            });
+            .unwrap_or_else(|| fatal("anchor.bitcoin.api_url is required"));
         let network = btc_config
             .get("network")
             .and_then(|v| v.as_str())
@@ -1980,14 +1962,10 @@ async fn cmd_anchor(backup: String, use_btc: bool, use_eth: bool) {
         let wif = btc_config
             .get("wif_private_key")
             .and_then(|v| v.as_str())
-            .unwrap_or_else(|| {
-                eprintln!("Error: anchor.bitcoin.wif_private_key is required");
-                std::process::exit(1);
-            });
+            .unwrap_or_else(|| fatal("anchor.bitcoin.wif_private_key is required"));
 
         if wif.is_empty() {
-            eprintln!("Error: anchor.bitcoin.wif_private_key is empty");
-            std::process::exit(1);
+            fatal("anchor.bitcoin.wif_private_key is empty");
         }
 
         println!("Anchoring to Bitcoin ({network})...");
@@ -2014,18 +1992,14 @@ async fn cmd_anchor(backup: String, use_btc: bool, use_eth: bool) {
 
     // 4. Ethereum anchoring
     if use_eth {
-        let eth_config = anchor_config.get("ethereum").unwrap_or_else(|| {
-            eprintln!("Error: [anchor.ethereum] section missing in config.toml");
-            std::process::exit(1);
-        });
+        let eth_config = anchor_config
+            .get("ethereum")
+            .unwrap_or_else(|| fatal("[anchor.ethereum] section missing in config.toml"));
 
         let rpc_url = eth_config
             .get("rpc_url")
             .and_then(|v| v.as_str())
-            .unwrap_or_else(|| {
-                eprintln!("Error: anchor.ethereum.rpc_url is required");
-                std::process::exit(1);
-            });
+            .unwrap_or_else(|| fatal("anchor.ethereum.rpc_url is required"));
         let network = eth_config
             .get("network")
             .and_then(|v| v.as_str())
@@ -2033,18 +2007,14 @@ async fn cmd_anchor(backup: String, use_btc: bool, use_eth: bool) {
         let pk_hex = eth_config
             .get("private_key_hex")
             .and_then(|v| v.as_str())
-            .unwrap_or_else(|| {
-                eprintln!("Error: anchor.ethereum.private_key_hex is required");
-                std::process::exit(1);
-            });
+            .unwrap_or_else(|| fatal("anchor.ethereum.private_key_hex is required"));
         let chain_id = eth_config
             .get("chain_id")
             .and_then(|v| v.as_integer())
             .unwrap_or(11155111) as u64;
 
         if pk_hex.is_empty() {
-            eprintln!("Error: anchor.ethereum.private_key_hex is empty");
-            std::process::exit(1);
+            fatal("anchor.ethereum.private_key_hex is empty");
         }
 
         println!("Anchoring to Ethereum ({network})...");
