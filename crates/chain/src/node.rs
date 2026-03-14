@@ -30,6 +30,12 @@ pub enum NodeError {
 
     #[error("Block height mismatch: expected {expected}, got {got}")]
     HeightMismatch { expected: u64, got: u64 },
+
+    #[error("Storage error: {0}")]
+    Storage(String),
+
+    #[error("Blob store error: {0}")]
+    BlobStore(String),
 }
 
 pub type Result<T> = std::result::Result<T, NodeError>;
@@ -107,13 +113,13 @@ impl Node {
     }
 
     /// Create a node by loading persisted state from storage.
-    /// Panics if no chain state is found in the database.
-    pub fn from_storage(config: NodeConfig, storage: Arc<Storage>) -> Self {
+    /// Returns an error if no chain state is found in the database.
+    pub fn from_storage(config: NodeConfig, storage: Arc<Storage>) -> Result<Self> {
         let state = storage
             .load_chain_state()
-            .expect("Failed to load chain state")
-            .expect("No chain state found in storage");
-        Self::from_state(state, config, storage)
+            .map_err(|e| NodeError::Storage(e.to_string()))?
+            .ok_or_else(|| NodeError::Storage("No chain state found in storage".to_string()))?;
+        Ok(Self::from_state(state, config, storage))
     }
 
     // ── Accessors ──
@@ -205,7 +211,7 @@ impl Node {
         // Persist state to RocksDB
         self.storage
             .save_chain_state(&self.state)
-            .expect("Failed to persist chain state");
+            .map_err(|e| NodeError::Storage(e.to_string()))?;
 
         info!(
             height = height.0,
@@ -253,23 +259,31 @@ impl Node {
     // ── Blob store operations (Mode B) ──
 
     /// Store an encrypted data blob. Returns the size in bytes.
-    pub fn put_blob(&mut self, key: String, data: Vec<u8>) -> usize {
-        self.blob_store.put(key, data)
+    pub fn put_blob(&mut self, key: String, data: Vec<u8>) -> Result<usize> {
+        self.blob_store
+            .put(key, data)
+            .map_err(|e| NodeError::BlobStore(e.to_string()))
     }
 
     /// Retrieve an encrypted data blob by key.
-    pub fn get_blob(&self, key: &str) -> Option<Vec<u8>> {
-        self.blob_store.get(key)
+    pub fn get_blob(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.blob_store
+            .get(key)
+            .map_err(|e| NodeError::BlobStore(e.to_string()))
     }
 
     /// List all blob keys stored on this node.
-    pub fn list_blobs(&self) -> Vec<String> {
-        self.blob_store.keys()
+    pub fn list_blobs(&self) -> Result<Vec<String>> {
+        self.blob_store
+            .keys()
+            .map_err(|e| NodeError::BlobStore(e.to_string()))
     }
 
     /// Total bytes stored in the blob store.
-    pub fn blob_store_size(&self) -> u64 {
-        self.blob_store.total_size()
+    pub fn blob_store_size(&self) -> Result<u64> {
+        self.blob_store
+            .total_size()
+            .map_err(|e| NodeError::BlobStore(e.to_string()))
     }
 
     /// Get the current validator set.

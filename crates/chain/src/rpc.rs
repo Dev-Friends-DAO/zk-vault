@@ -353,7 +353,14 @@ async fn handle_upload_data(
         })?;
 
     let mut node = node.lock().unwrap();
-    let size = node.put_blob(req.key.clone(), data);
+    let size = node.put_blob(req.key.clone(), data).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
     info!(key = %req.key, size, "blob uploaded");
 
     Ok(Json(UploadDataResponse { key: req.key, size }))
@@ -365,14 +372,24 @@ async fn handle_download_data(
 ) -> Result<Json<DownloadDataResponse>, (StatusCode, Json<ErrorResponse>)> {
     use base64::Engine;
     let node = node.lock().unwrap();
-    let data = node.get_blob(&req.key).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Blob not found: {}", req.key),
-            }),
-        )
-    })?;
+    let data = node
+        .get_blob(&req.key)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Blob not found: {}", req.key),
+                }),
+            )
+        })?;
 
     let size = data.len();
     let data_b64 = base64::engine::general_purpose::STANDARD.encode(&data);
@@ -550,11 +567,27 @@ async fn handle_get_key_status(
     }))
 }
 
-async fn handle_list_data(State(node): State<SharedNode>) -> Json<ListDataResponse> {
+async fn handle_list_data(
+    State(node): State<SharedNode>,
+) -> Result<Json<ListDataResponse>, (StatusCode, Json<ErrorResponse>)> {
     let node = node.lock().unwrap();
-    let keys = node.list_blobs();
-    let total_size = node.blob_store_size();
-    Json(ListDataResponse { keys, total_size })
+    let keys = node.list_blobs().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    let total_size = node.blob_store_size().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    Ok(Json(ListDataResponse { keys, total_size }))
 }
 
 #[cfg(test)]

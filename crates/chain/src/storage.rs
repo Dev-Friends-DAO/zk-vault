@@ -74,6 +74,13 @@ impl Storage {
         Ok(Self { db })
     }
 
+    /// Get a column family handle, returning an error if not found.
+    fn cf(&self, name: &str) -> Result<&rocksdb::ColumnFamily> {
+        self.db
+            .cf_handle(name)
+            .ok_or_else(|| StorageError::NotFound(format!("Column family '{name}' not found")))
+    }
+
     // ── Metadata operations ──
 
     pub fn save_height(&self, height: Height) -> Result<()> {
@@ -131,24 +138,24 @@ impl Storage {
     // ── Blob operations (CF: blobs) ──
 
     pub fn put_blob(&self, key: &str, data: &[u8]) -> Result<()> {
-        let cf = self.db.cf_handle(CF_BLOBS).unwrap();
+        let cf = self.cf(CF_BLOBS)?;
         self.db.put_cf(&cf, key.as_bytes(), data)?;
         Ok(())
     }
 
     pub fn get_blob(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let cf = self.db.cf_handle(CF_BLOBS).unwrap();
+        let cf = self.cf(CF_BLOBS)?;
         Ok(self.db.get_cf(&cf, key.as_bytes())?)
     }
 
     pub fn delete_blob(&self, key: &str) -> Result<()> {
-        let cf = self.db.cf_handle(CF_BLOBS).unwrap();
+        let cf = self.cf(CF_BLOBS)?;
         self.db.delete_cf(&cf, key.as_bytes())?;
         Ok(())
     }
 
     pub fn list_blob_keys(&self) -> Result<Vec<String>> {
-        let cf = self.db.cf_handle(CF_BLOBS).unwrap();
+        let cf = self.cf(CF_BLOBS)?;
         let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
         let mut keys = Vec::new();
         for item in iter {
@@ -161,7 +168,7 @@ impl Storage {
     }
 
     pub fn blob_count_and_size(&self) -> Result<(usize, u64)> {
-        let cf = self.db.cf_handle(CF_BLOBS).unwrap();
+        let cf = self.cf(CF_BLOBS)?;
         let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
         let mut count = 0usize;
         let mut total_size = 0u64;
@@ -176,7 +183,7 @@ impl Storage {
     // ── File registry operations (CF: files) ──
 
     pub fn put_file(&self, merkle_root: &[u8; 32], entry: &FileEntry) -> Result<()> {
-        let cf = self.db.cf_handle(CF_FILES).unwrap();
+        let cf = self.cf(CF_FILES)?;
         let key = hex::encode(merkle_root);
         let value =
             serde_json::to_vec(entry).map_err(|e| StorageError::Serialization(e.to_string()))?;
@@ -185,7 +192,7 @@ impl Storage {
     }
 
     pub fn get_file(&self, merkle_root: &[u8; 32]) -> Result<Option<FileEntry>> {
-        let cf = self.db.cf_handle(CF_FILES).unwrap();
+        let cf = self.cf(CF_FILES)?;
         let key = hex::encode(merkle_root);
         match self.db.get_cf(&cf, key.as_bytes())? {
             Some(bytes) => {
@@ -198,7 +205,7 @@ impl Storage {
     }
 
     pub fn load_all_files(&self) -> Result<std::collections::BTreeMap<[u8; 32], FileEntry>> {
-        let cf = self.db.cf_handle(CF_FILES).unwrap();
+        let cf = self.cf(CF_FILES)?;
         let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
         let mut map = std::collections::BTreeMap::new();
         for item in iter {
@@ -220,7 +227,7 @@ impl Storage {
     // ── Guardian registry operations (CF: guardians) ──
 
     pub fn put_guardian_set(&self, owner_pk: &[u8; 32], set: &GuardianSet) -> Result<()> {
-        let cf = self.db.cf_handle(CF_GUARDIANS).unwrap();
+        let cf = self.cf(CF_GUARDIANS)?;
         let key = hex::encode(owner_pk);
         let value =
             serde_json::to_vec(set).map_err(|e| StorageError::Serialization(e.to_string()))?;
@@ -229,7 +236,7 @@ impl Storage {
     }
 
     pub fn get_guardian_set(&self, owner_pk: &[u8; 32]) -> Result<Option<GuardianSet>> {
-        let cf = self.db.cf_handle(CF_GUARDIANS).unwrap();
+        let cf = self.cf(CF_GUARDIANS)?;
         let key = hex::encode(owner_pk);
         match self.db.get_cf(&cf, key.as_bytes())? {
             Some(bytes) => {
@@ -242,7 +249,7 @@ impl Storage {
     }
 
     pub fn load_all_guardians(&self) -> Result<std::collections::BTreeMap<[u8; 32], GuardianSet>> {
-        let cf = self.db.cf_handle(CF_GUARDIANS).unwrap();
+        let cf = self.cf(CF_GUARDIANS)?;
         let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
         let mut map = std::collections::BTreeMap::new();
         for item in iter {
@@ -264,7 +271,7 @@ impl Storage {
     // ── Recovery request operations (CF: recovery) ──
 
     pub fn put_recovery_request(&self, owner_pk: &[u8; 32], req: &RecoveryRequest) -> Result<()> {
-        let cf = self.db.cf_handle(CF_RECOVERY).unwrap();
+        let cf = self.cf(CF_RECOVERY)?;
         let key = hex::encode(owner_pk);
         let value =
             serde_json::to_vec(req).map_err(|e| StorageError::Serialization(e.to_string()))?;
@@ -273,7 +280,7 @@ impl Storage {
     }
 
     pub fn get_recovery_request(&self, owner_pk: &[u8; 32]) -> Result<Option<RecoveryRequest>> {
-        let cf = self.db.cf_handle(CF_RECOVERY).unwrap();
+        let cf = self.cf(CF_RECOVERY)?;
         let key = hex::encode(owner_pk);
         match self.db.get_cf(&cf, key.as_bytes())? {
             Some(bytes) => {
@@ -288,7 +295,7 @@ impl Storage {
     pub fn load_all_recovery_requests(
         &self,
     ) -> Result<std::collections::BTreeMap<[u8; 32], RecoveryRequest>> {
-        let cf = self.db.cf_handle(CF_RECOVERY).unwrap();
+        let cf = self.cf(CF_RECOVERY)?;
         let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
         let mut map = std::collections::BTreeMap::new();
         for item in iter {
@@ -310,7 +317,7 @@ impl Storage {
     // ── Key registry operations (CF: keys) ──
 
     pub fn put_key_entry(&self, owner_pk: &[u8; 32], entry: &KeyEntry) -> Result<()> {
-        let cf = self.db.cf_handle(CF_KEYS).unwrap();
+        let cf = self.cf(CF_KEYS)?;
         let key = hex::encode(owner_pk);
         let value =
             serde_json::to_vec(entry).map_err(|e| StorageError::Serialization(e.to_string()))?;
@@ -319,7 +326,7 @@ impl Storage {
     }
 
     pub fn get_key_entry(&self, owner_pk: &[u8; 32]) -> Result<Option<KeyEntry>> {
-        let cf = self.db.cf_handle(CF_KEYS).unwrap();
+        let cf = self.cf(CF_KEYS)?;
         let key = hex::encode(owner_pk);
         match self.db.get_cf(&cf, key.as_bytes())? {
             Some(bytes) => {
@@ -332,7 +339,7 @@ impl Storage {
     }
 
     pub fn load_all_keys(&self) -> Result<std::collections::BTreeMap<[u8; 32], KeyEntry>> {
-        let cf = self.db.cf_handle(CF_KEYS).unwrap();
+        let cf = self.cf(CF_KEYS)?;
         let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
         let mut map = std::collections::BTreeMap::new();
         for item in iter {
@@ -368,7 +375,7 @@ impl Storage {
         batch.put(META_VALIDATOR_SET, vs_json);
 
         // File registry
-        let cf_files = self.db.cf_handle(CF_FILES).unwrap();
+        let cf_files = self.cf(CF_FILES)?;
         for (root, entry) in &state.file_registry {
             let key = hex::encode(root);
             let value = serde_json::to_vec(entry)
@@ -377,7 +384,7 @@ impl Storage {
         }
 
         // Guardian registry
-        let cf_guardians = self.db.cf_handle(CF_GUARDIANS).unwrap();
+        let cf_guardians = self.cf(CF_GUARDIANS)?;
         for (pk, set) in &state.guardian_registry {
             let key = hex::encode(pk);
             let value =
@@ -386,7 +393,7 @@ impl Storage {
         }
 
         // Recovery requests
-        let cf_recovery = self.db.cf_handle(CF_RECOVERY).unwrap();
+        let cf_recovery = self.cf(CF_RECOVERY)?;
         for (pk, req) in &state.recovery_requests {
             let key = hex::encode(pk);
             let value =
@@ -395,7 +402,7 @@ impl Storage {
         }
 
         // Key registry
-        let cf_keys = self.db.cf_handle(CF_KEYS).unwrap();
+        let cf_keys = self.cf(CF_KEYS)?;
         for (pk, entry) in &state.key_registry {
             let key = hex::encode(pk);
             let value = serde_json::to_vec(entry)

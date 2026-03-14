@@ -333,8 +333,9 @@ impl ChainState {
                 total_guardians,
                 signature,
             } => {
-                // Verify owner signature over BLAKE3(guardian_pk || threshold || total_guardians)
+                // Verify owner signature over BLAKE3(domain || guardian_pk || threshold || total_guardians)
                 let mut msg = Vec::new();
+                msg.extend_from_slice(b"zk-vault:register-guardian:");
                 msg.extend_from_slice(guardian_pk);
                 msg.push(*threshold);
                 msg.push(*total_guardians);
@@ -410,8 +411,9 @@ impl ChainState {
                 share_data,
                 signature,
             } => {
-                // Verify guardian signature over BLAKE3(owner_pk || share_data)
+                // Verify guardian signature over BLAKE3(domain || owner_pk || share_data)
                 let mut msg = Vec::new();
+                msg.extend_from_slice(b"zk-vault:approve-recovery:");
                 msg.extend_from_slice(owner_pk);
                 msg.extend_from_slice(share_data.as_bytes());
                 let msg_hash = blake3::hash(&msg);
@@ -461,8 +463,11 @@ impl ChainState {
                 new_ed25519_pk,
                 signature,
             } => {
-                // Verify signature with current owner_pk over BLAKE3(new_ed25519_pk)
-                let msg_hash = blake3::hash(new_ed25519_pk);
+                // Verify signature with current owner_pk over BLAKE3(domain || new_ed25519_pk)
+                let mut msg = Vec::new();
+                msg.extend_from_slice(b"zk-vault:revoke-keys:");
+                msg.extend_from_slice(new_ed25519_pk);
+                let msg_hash = blake3::hash(&msg);
                 verify_ed25519(owner_pk, msg_hash.as_bytes(), signature)?;
 
                 // Check key is not already revoked
@@ -748,6 +753,7 @@ mod tests {
         total_guardians: u8,
     ) -> Transaction {
         let mut msg = Vec::new();
+        msg.extend_from_slice(b"zk-vault:register-guardian:");
         msg.extend_from_slice(guardian_pk);
         msg.push(threshold);
         msg.push(total_guardians);
@@ -855,6 +861,7 @@ mod tests {
         let (g1_sk, g1_pk) = &guardian_keys[0];
         let share_data_1 = "recovered_share_1";
         let mut msg1 = Vec::new();
+        msg1.extend_from_slice(b"zk-vault:approve-recovery:");
         msg1.extend_from_slice(owner_pk);
         msg1.extend_from_slice(share_data_1.as_bytes());
         let msg1_hash = blake3::hash(&msg1);
@@ -880,6 +887,7 @@ mod tests {
         let (g2_sk, g2_pk) = &guardian_keys[1];
         let share_data_2 = "recovered_share_2";
         let mut msg2 = Vec::new();
+        msg2.extend_from_slice(b"zk-vault:approve-recovery:");
         msg2.extend_from_slice(owner_pk);
         msg2.extend_from_slice(share_data_2.as_bytes());
         let msg2_hash = blake3::hash(&msg2);
@@ -909,7 +917,10 @@ mod tests {
 
         // Revoke and set new key
         let (_, new_pk) = make_keypair(50);
-        let msg_hash = blake3::hash(&new_pk);
+        let mut revoke_msg = Vec::new();
+        revoke_msg.extend_from_slice(b"zk-vault:revoke-keys:");
+        revoke_msg.extend_from_slice(&new_pk);
+        let msg_hash = blake3::hash(&revoke_msg);
         let sig = owner_sk.sign(msg_hash.as_bytes());
         let tx = Transaction::RevokeKeys {
             owner_pk: *owner_pk,
@@ -933,7 +944,10 @@ mod tests {
 
         // Revoke key
         let (_, new_pk) = make_keypair(50);
-        let msg_hash = blake3::hash(&new_pk);
+        let mut revoke_msg = Vec::new();
+        revoke_msg.extend_from_slice(b"zk-vault:revoke-keys:");
+        revoke_msg.extend_from_slice(&new_pk);
+        let msg_hash = blake3::hash(&revoke_msg);
         let sig = owner_sk.sign(msg_hash.as_bytes());
         let block = make_block(
             &state,

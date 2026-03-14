@@ -218,8 +218,9 @@ fn pre_validate(tx: &Transaction, state: &ChainState) -> Result<()> {
             if signature.is_empty() {
                 return Err(MempoolError::Invalid("empty signature".to_string()));
             }
-            // Verify signature over BLAKE3(guardian_pk || threshold || total_guardians)
+            // Verify signature over BLAKE3(domain || guardian_pk || threshold || total_guardians)
             let mut msg = Vec::new();
+            msg.extend_from_slice(b"zk-vault:register-guardian:");
             msg.extend_from_slice(guardian_pk);
             msg.push(*threshold);
             msg.push(*total_guardians);
@@ -255,8 +256,9 @@ fn pre_validate(tx: &Transaction, state: &ChainState) -> Result<()> {
             if signature.is_empty() {
                 return Err(MempoolError::Invalid("empty signature".to_string()));
             }
-            // Verify guardian signature over BLAKE3(owner_pk || share_data)
+            // Verify guardian signature over BLAKE3(domain || owner_pk || share_data)
             let mut msg = Vec::new();
+            msg.extend_from_slice(b"zk-vault:approve-recovery:");
             msg.extend_from_slice(owner_pk);
             msg.extend_from_slice(share_data.as_bytes());
             let msg_hash = blake3::hash(&msg);
@@ -271,8 +273,11 @@ fn pre_validate(tx: &Transaction, state: &ChainState) -> Result<()> {
             if signature.is_empty() {
                 return Err(MempoolError::Invalid("empty signature".to_string()));
             }
-            // Verify signature with owner_pk over BLAKE3(new_ed25519_pk)
-            let msg_hash = blake3::hash(new_ed25519_pk);
+            // Verify signature with owner_pk over BLAKE3(domain || new_ed25519_pk)
+            let mut msg = Vec::new();
+            msg.extend_from_slice(b"zk-vault:revoke-keys:");
+            msg.extend_from_slice(new_ed25519_pk);
+            let msg_hash = blake3::hash(&msg);
             verify_ed25519_quick(owner_pk, msg_hash.as_bytes(), signature)?;
         }
     }

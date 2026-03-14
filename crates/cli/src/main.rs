@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use zk_vault_core::crypto::{aead, bundle, hash, kem, keys};
 use zk_vault_core::manifest::{ManifestBuilder, ManifestFileEntry, StorageLocation};
@@ -38,7 +39,9 @@ struct VaultConfig {
 }
 
 fn load_vault_config() -> VaultConfig {
-    let config_path = keys::vault_dir().join("config.toml");
+    let config_path = keys::vault_dir()
+        .unwrap_or_else(|e| fatal_with("vault dir", e))
+        .join("config.toml");
     if !config_path.exists() {
         return VaultConfig::default();
     }
@@ -103,8 +106,10 @@ fn unlock_vault(keyfile: &Option<PathBuf>) -> keys::UnlockedKeys {
 
     let keyfile_data = resolve_keyfile(keyfile);
 
-    let passphrase = rpassword::prompt_password("Enter passphrase: ")
-        .unwrap_or_else(|e| fatal_with("reading passphrase", e));
+    let passphrase = Zeroizing::new(
+        rpassword::prompt_password("Enter passphrase: ")
+            .unwrap_or_else(|e| fatal_with("reading passphrase", e)),
+    );
 
     keys::unlock_all_keys(passphrase.as_bytes(), &store, keyfile_data.as_deref(), None)
         .unwrap_or_else(|e| fatal_with("unlocking vault", e))
@@ -116,8 +121,10 @@ fn load_and_unlock(keyfile: &Option<PathBuf>) -> (keys::EncryptedKeyStore, keys:
 
     let keyfile_data = resolve_keyfile(keyfile);
 
-    let passphrase = rpassword::prompt_password("Enter passphrase: ")
-        .unwrap_or_else(|e| fatal_with("reading passphrase", e));
+    let passphrase = Zeroizing::new(
+        rpassword::prompt_password("Enter passphrase: ")
+            .unwrap_or_else(|e| fatal_with("reading passphrase", e)),
+    );
 
     let unlocked =
         keys::unlock_all_keys(passphrase.as_bytes(), &store, keyfile_data.as_deref(), None)
@@ -269,6 +276,12 @@ enum GuardianAction {
         /// Path to an encrypted share file
         #[arg(long)]
         share_file: PathBuf,
+        /// Recovery threshold (K shares needed)
+        #[arg(long, default_value = "3")]
+        threshold: u8,
+        /// Total number of guardians (N)
+        #[arg(long, default_value = "5")]
+        total_guardians: u8,
         /// Chain node URL (falls back to config.toml vault.chain_url)
         #[arg(long)]
         chain: Option<String>,
@@ -328,9 +341,13 @@ async fn main() {
             GuardianAction::List { chain } => cmd_guardian_list(chain).await,
             GuardianAction::Register {
                 share_file,
+                threshold,
+                total_guardians,
                 chain,
                 keyfile,
-            } => cmd_guardian_register(share_file, chain, keyfile).await,
+            } => {
+                cmd_guardian_register(share_file, threshold, total_guardians, chain, keyfile).await
+            }
         },
         Commands::RotateKeys { chain, keyfile } => cmd_rotate_keys(chain, keyfile).await,
     }
@@ -343,7 +360,7 @@ fn load_keyfile(path: &Option<PathBuf>) -> Option<Vec<u8>> {
 
 fn cmd_init(generate_keyfile: Option<PathBuf>, keyfile_path: Option<PathBuf>) {
     // Check if vault already exists
-    let keystore_path = keys::keystore_path();
+    let keystore_path = keys::keystore_path().unwrap_or_else(|e| fatal_with("keystore path", e));
     if keystore_path.exists() {
         fatal(&format!(
             "Vault already exists at {}. To reinitialize, remove the existing keystore first.",
@@ -352,17 +369,21 @@ fn cmd_init(generate_keyfile: Option<PathBuf>, keyfile_path: Option<PathBuf>) {
     }
 
     // Prompt for passphrase
-    let passphrase = rpassword::prompt_password("Enter passphrase for new vault: ")
-        .unwrap_or_else(|e| fatal_with("reading passphrase", e));
+    let passphrase = Zeroizing::new(
+        rpassword::prompt_password("Enter passphrase for new vault: ")
+            .unwrap_or_else(|e| fatal_with("reading passphrase", e)),
+    );
 
     if passphrase.is_empty() {
         fatal("Passphrase cannot be empty.");
     }
 
-    let confirm = rpassword::prompt_password("Confirm passphrase: ")
-        .unwrap_or_else(|e| fatal_with("reading passphrase", e));
+    let confirm = Zeroizing::new(
+        rpassword::prompt_password("Confirm passphrase: ")
+            .unwrap_or_else(|e| fatal_with("reading passphrase", e)),
+    );
 
-    if passphrase != confirm {
+    if *passphrase != *confirm {
         fatal("Passphrases do not match.");
     }
 
@@ -414,7 +435,7 @@ fn cmd_init(generate_keyfile: Option<PathBuf>, keyfile_path: Option<PathBuf>) {
 
 fn cmd_recover(keyfile_path: Option<PathBuf>, generate_keyfile_path: Option<PathBuf>) {
     // Check vault doesn't exist (or offer to overwrite)
-    let keystore_path = keys::keystore_path();
+    let keystore_path = keys::keystore_path().unwrap_or_else(|e| fatal_with("keystore path", e));
     if keystore_path.exists() {
         warn!(
             "Vault already exists at {}, recovery will overwrite",
@@ -436,14 +457,18 @@ fn cmd_recover(keyfile_path: Option<PathBuf>, generate_keyfile_path: Option<Path
     let mnemonic = mnemonic.trim();
 
     // Prompt for new passphrase
-    let passphrase = rpassword::prompt_password("Enter new passphrase: ")
-        .unwrap_or_else(|e| fatal_with("reading passphrase", e));
+    let passphrase = Zeroizing::new(
+        rpassword::prompt_password("Enter new passphrase: ")
+            .unwrap_or_else(|e| fatal_with("reading passphrase", e)),
+    );
     if passphrase.is_empty() {
         fatal("Passphrase cannot be empty.");
     }
-    let confirm = rpassword::prompt_password("Confirm passphrase: ")
-        .unwrap_or_else(|e| fatal_with("reading passphrase", e));
-    if passphrase != confirm {
+    let confirm = Zeroizing::new(
+        rpassword::prompt_password("Confirm passphrase: ")
+            .unwrap_or_else(|e| fatal_with("reading passphrase", e)),
+    );
+    if *passphrase != *confirm {
         fatal("Passphrases do not match.");
     }
 
@@ -543,9 +568,13 @@ async fn cmd_guardian_list(chain_url_arg: Option<String>) {
 
 async fn cmd_guardian_register(
     share_file: PathBuf,
+    threshold: u8,
+    total_guardians: u8,
     chain_url_arg: Option<String>,
     keyfile_path: Option<PathBuf>,
 ) {
+    use ed25519_dalek::{Signer, SigningKey};
+
     let chain_url = resolve_chain_url(&chain_url_arg)
         .unwrap_or_else(|| fatal("--chain is required (or set vault.chain_url in config.toml)"));
 
@@ -553,19 +582,87 @@ async fn cmd_guardian_register(
     let share_json = std::fs::read_to_string(&share_file)
         .unwrap_or_else(|e| fatal_with("reading share file", e));
 
-    // Load keystore and unlock
-    let (_store, _unlocked) = load_and_unlock(&keyfile_path);
-
-    // Parse share to get guardian info
-    let _share: serde_json::Value =
+    // Parse share data (validates JSON)
+    let share: serde_json::Value =
         serde_json::from_str(&share_json).unwrap_or_else(|e| fatal_with("parsing share file", e));
 
-    // For now, the share file contains a Shamir share.
-    // The guardian's PK would need to be provided separately or embedded.
-    // Simplified: just submit the share data to chain
-    info!(chain = %chain_url, share_file = %share_file.display(), "Guardian registration submitted");
-    println!("Guardian registration submitted to {}", chain_url);
-    println!("Share file: {}", share_file.display());
+    let share_index = share
+        .get("index")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(|| fatal("share file missing 'index' field"));
+
+    // Load keystore and unlock
+    let (_store, unlocked) = load_and_unlock(&keyfile_path);
+
+    // For self-registration, the owner registers the guardian using their own identity.
+    // The guardian_pk is the owner's Ed25519 pk (self-registration placeholder).
+    // In a full multi-party flow, the guardian would provide their own Ed25519 pk.
+    let guardian_pk = unlocked.ed25519_pk;
+
+    // Build signature: BLAKE3("zk-vault:register-guardian:" || guardian_pk || threshold || total_guardians)
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"zk-vault:register-guardian:");
+    msg.extend_from_slice(&guardian_pk);
+    msg.push(threshold);
+    msg.push(total_guardians);
+    let msg_hash = blake3::hash(&msg);
+
+    let signing_key = SigningKey::from_bytes(&unlocked.ed25519_sk);
+    let signature = signing_key.sign(msg_hash.as_bytes());
+
+    // Build RegisterGuardian transaction
+    let tx = serde_json::json!({
+        "RegisterGuardian": {
+            "owner_pk": unlocked.ed25519_pk.to_vec(),
+            "guardian_pk": guardian_pk.to_vec(),
+            "encrypted_share": share_json,
+            "threshold": threshold,
+            "total_guardians": total_guardians,
+            "signature": signature.to_bytes().to_vec(),
+        }
+    });
+    let tx_json = tx.to_string();
+
+    info!(
+        chain = %chain_url,
+        share_file = %share_file.display(),
+        share_index = share_index,
+        "Submitting RegisterGuardian transaction"
+    );
+    println!("Registering guardian (share {share_index}) on {chain_url}...");
+
+    // Submit to chain
+    let client = reqwest::Client::new();
+    let url = format!("{}/submit_tx", chain_url.trim_end_matches('/'));
+    let body = serde_json::json!({ "tx_json": tx_json });
+
+    match client.post(&url).json(&body).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+
+            if status.is_success() {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body_text) {
+                    let tx_hash = parsed["tx_hash"].as_str().unwrap_or("?");
+                    info!(chain = %chain_url, tx_hash = %tx_hash, "Guardian registered");
+                    println!("  Guardian registration: SUCCESS");
+                    println!("  tx_hash: {tx_hash}");
+                } else {
+                    println!("  Guardian registration: SUCCESS");
+                }
+                println!("  Share file: {}", share_file.display());
+                println!("  Threshold: {threshold} of {total_guardians}");
+            } else {
+                error!(chain = %chain_url, status = %status, "Guardian registration failed");
+                eprintln!("  Guardian registration: FAILED (HTTP {status})");
+                eprintln!("  Response: {body_text}");
+            }
+        }
+        Err(e) => {
+            error!(chain = %chain_url, err = %e, "Guardian registration failed");
+            eprintln!("  Guardian registration: FAILED (connection error: {e})");
+        }
+    }
 }
 
 async fn cmd_rotate_keys(chain_url: Option<String>, keyfile_path: Option<PathBuf>) {
@@ -574,8 +671,10 @@ async fn cmd_rotate_keys(chain_url: Option<String>, keyfile_path: Option<PathBuf
 
     let store = keys::load_key_store().unwrap_or_else(|e| fatal_with("loading keystore", e));
 
-    let passphrase = rpassword::prompt_password("Enter passphrase: ")
-        .unwrap_or_else(|e| fatal_with("reading passphrase", e));
+    let passphrase = Zeroizing::new(
+        rpassword::prompt_password("Enter passphrase: ")
+            .unwrap_or_else(|e| fatal_with("reading passphrase", e)),
+    );
 
     // Unlock to get the MK and generate mnemonic for the MK
     let unlocked =
@@ -646,7 +745,9 @@ async fn cmd_rotate_keys(chain_url: Option<String>, keyfile_path: Option<PathBuf
 
 /// Load S3 config from ~/.zk-vault/config.toml.
 fn load_s3_config() -> S3Config {
-    let config_path = keys::vault_dir().join("config.toml");
+    let config_path = keys::vault_dir()
+        .unwrap_or_else(|e| fatal_with("vault dir", e))
+        .join("config.toml");
     if !config_path.exists() {
         fatal(&format!(
             "No config file found at {}. Create it with S3 storage settings. See config.example.toml.",
@@ -734,7 +835,9 @@ fn collect_dir_recursive(dir: &PathBuf, files: &mut Vec<PathBuf>) {
 
 /// Save a manifest to ~/.zk-vault/manifests/.
 fn save_manifest(manifest: &zk_vault_core::manifest::BackupManifest) -> std::io::Result<PathBuf> {
-    let dir = keys::vault_dir().join("manifests");
+    let dir = keys::vault_dir()
+        .unwrap_or_else(|e| fatal_with("vault dir", e))
+        .join("manifests");
     std::fs::create_dir_all(&dir)?;
     let filename = format!("{}.json", manifest.backup_id);
     let path = dir.join(&filename);
@@ -753,7 +856,9 @@ async fn cmd_backup(
 ) {
     // 1. Determine storage targets
     let effective_chain = resolve_chain_url(&chain_url);
-    let config_path = keys::vault_dir().join("config.toml");
+    let config_path = keys::vault_dir()
+        .unwrap_or_else(|e| fatal_with("vault dir", e))
+        .join("config.toml");
     let use_s3 = config_path.exists();
     let use_local = local_dir.is_some();
 
@@ -1205,6 +1310,7 @@ fn resolve_manifest_path(backup: &str) -> PathBuf {
 
     // Try as backup ID in manifests dir
     let manifest_path = keys::vault_dir()
+        .unwrap_or_else(|e| fatal_with("vault dir", e))
         .join("manifests")
         .join(format!("{backup}.json"));
     if manifest_path.exists() {
@@ -1213,7 +1319,7 @@ fn resolve_manifest_path(backup: &str) -> PathBuf {
 
     fatal(&format!(
         "Cannot find manifest for '{backup}'. Provide a backup ID or path to a manifest file. Available manifests: {}",
-        keys::vault_dir().join("manifests").display()
+        keys::vault_dir().unwrap_or_else(|e| fatal_with("vault dir", e)).join("manifests").display()
     ));
 }
 
@@ -1259,7 +1365,9 @@ async fn cmd_restore(
     let (_store, unlocked) = load_and_unlock(&keyfile_path);
 
     // 4. Set up S3 if available
-    let config_path = keys::vault_dir().join("config.toml");
+    let config_path = keys::vault_dir()
+        .unwrap_or_else(|e| fatal_with("vault dir", e))
+        .join("config.toml");
     let s3_storage = if config_path.exists() {
         let s3_config = load_s3_config();
         S3Backend::new(&s3_config).ok()
@@ -1483,7 +1591,9 @@ async fn cmd_verify(backup: String, chain_url: Option<String>, _keyfile_path: Op
     }
 
     // Check 2: Storage availability
-    let config_path = keys::vault_dir().join("config.toml");
+    let config_path = keys::vault_dir()
+        .unwrap_or_else(|e| fatal_with("vault dir", e))
+        .join("config.toml");
     let s3_storage = if config_path.exists() {
         let s3_config = load_s3_config();
         S3Backend::new(&s3_config).ok()
@@ -1608,8 +1718,10 @@ async fn attest_on_chain(chain_url: &str, merkle_root: [u8; 32]) {
         }
     };
 
-    let passphrase = rpassword::prompt_password("Enter passphrase for chain attestation: ")
-        .expect("Failed to read passphrase");
+    let passphrase = Zeroizing::new(
+        rpassword::prompt_password("Enter passphrase for chain attestation: ")
+            .expect("Failed to read passphrase"),
+    );
 
     let unlocked = match keys::unlock_all_keys(passphrase.as_bytes(), &store, None, None) {
         Ok(u) => u,
@@ -1704,8 +1816,8 @@ async fn cmd_status(chain_url: Option<String>, _keyfile_path: Option<PathBuf>) {
     println!("===============");
 
     // 1. Vault existence
-    let vault_dir = keys::vault_dir();
-    let keystore_path = keys::keystore_path();
+    let vault_dir = keys::vault_dir().unwrap_or_else(|e| fatal_with("vault dir", e));
+    let keystore_path = keys::keystore_path().unwrap_or_else(|e| fatal_with("keystore path", e));
 
     if !keystore_path.exists() {
         println!();
@@ -1847,7 +1959,9 @@ async fn query_chain_status(chain_url: &str) {
     }
 
     // Cross-reference local manifests with chain
-    let manifests_dir = keys::vault_dir().join("manifests");
+    let manifests_dir = keys::vault_dir()
+        .unwrap_or_else(|e| fatal_with("vault dir", e))
+        .join("manifests");
     if !manifests_dir.exists() {
         return;
     }
@@ -1909,7 +2023,7 @@ async fn query_chain_status(chain_url: &str) {
 
 /// Load anchoring config from ~/.zk-vault/config.toml.
 fn load_anchor_config() -> Option<toml::Value> {
-    let config_path = keys::vault_dir().join("config.toml");
+    let config_path = keys::vault_dir().ok()?.join("config.toml");
     if !config_path.exists() {
         return None;
     }
@@ -2040,6 +2154,7 @@ async fn cmd_anchor(backup: String, use_btc: bool, use_eth: bool) {
     // 5. Save receipts to manifest directory
     if !receipts.is_empty() {
         let receipts_path = keys::vault_dir()
+            .unwrap_or_else(|e| fatal_with("vault dir", e))
             .join("manifests")
             .join(format!("{}.anchors.json", manifest.backup_id));
         match serde_json::to_string_pretty(&receipts) {

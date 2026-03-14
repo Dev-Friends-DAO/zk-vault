@@ -58,10 +58,29 @@ pub struct EncryptedKeyStore {
     /// Whether a hardware key was used during key derivation.
     #[serde(default)]
     pub hwkey_enabled: bool,
+    /// Argon2id time cost parameter.
+    #[serde(default = "default_argon2_time_cost")]
+    pub kdf_time_cost: u32,
+    /// Argon2id memory cost in KiB.
+    #[serde(default = "default_argon2_memory_kib")]
+    pub kdf_memory_kib: u32,
+    /// Argon2id parallelism parameter.
+    #[serde(default = "default_argon2_parallelism")]
+    pub kdf_parallelism: u32,
+}
+
+fn default_argon2_time_cost() -> u32 {
+    3
+}
+fn default_argon2_memory_kib() -> u32 {
+    262_144
+}
+fn default_argon2_parallelism() -> u32 {
+    4
 }
 
 impl EncryptedKeyStore {
-    pub const CURRENT_VERSION: u32 = 2;
+    pub const CURRENT_VERSION: u32 = 3;
 }
 
 /// Generate a new key store: create all key pairs, encrypt secret keys with
@@ -130,6 +149,9 @@ pub fn generate_key_store(
         ed25519_pk: hex::encode(ed25519_kp.verifying_key.to_bytes()),
         keyfile_hash: keyfile.map(|kf| hex::encode(hash::hash(kf))),
         hwkey_enabled: hwkey_response.is_some(),
+        kdf_time_cost: kdf::ARGON2_TIME_COST,
+        kdf_memory_kib: kdf::ARGON2_MEMORY_KIB,
+        kdf_parallelism: kdf::ARGON2_PARALLELISM,
     };
 
     Ok((store, mnemonic_phrase))
@@ -196,6 +218,9 @@ pub fn recover_from_mnemonic(
         ed25519_pk: hex::encode(ed25519_kp.verifying_key.to_bytes()),
         keyfile_hash: keyfile.map(|kf| hex::encode(hash::hash(kf))),
         hwkey_enabled: hwkey_response.is_some(),
+        kdf_time_cost: kdf::ARGON2_TIME_COST,
+        kdf_memory_kib: kdf::ARGON2_MEMORY_KIB,
+        kdf_parallelism: kdf::ARGON2_PARALLELISM,
     })
 }
 
@@ -256,6 +281,9 @@ pub fn recover_from_mnemonic_test(
         ed25519_pk: hex::encode(ed25519_kp.verifying_key.to_bytes()),
         keyfile_hash: keyfile.map(|kf| hex::encode(hash::hash(kf))),
         hwkey_enabled: hwkey_response.is_some(),
+        kdf_time_cost: kdf::ARGON2_TIME_COST,
+        kdf_memory_kib: kdf::ARGON2_MEMORY_KIB,
+        kdf_parallelism: kdf::ARGON2_PARALLELISM,
     })
 }
 
@@ -281,7 +309,15 @@ pub fn unlock_master_key(
     let salt = hex::decode(&store.kdf_salt)
         .map_err(|e| VaultError::KeyDerivation(format!("Invalid salt hex: {e}")))?;
 
-    let pdk = kdf::derive_pdk(passphrase, &salt, keyfile, hwkey_response)?;
+    let pdk = kdf::derive_pdk_with_params(
+        passphrase,
+        &salt,
+        keyfile,
+        hwkey_response,
+        store.kdf_time_cost,
+        store.kdf_memory_kib,
+        store.kdf_parallelism,
+    )?;
 
     let nonce_bytes = hex::decode(&store.master_key_nonce)
         .map_err(|e| VaultError::Decryption(format!("Invalid nonce hex: {e}")))?;
@@ -361,7 +397,15 @@ pub fn unlock_all_keys(
 
     let salt = hex::decode(&store.kdf_salt)
         .map_err(|e| VaultError::KeyDerivation(format!("Invalid salt hex: {e}")))?;
-    let pdk = kdf::derive_pdk(passphrase, &salt, keyfile, hwkey_response)?;
+    let pdk = kdf::derive_pdk_with_params(
+        passphrase,
+        &salt,
+        keyfile,
+        hwkey_response,
+        store.kdf_time_cost,
+        store.kdf_memory_kib,
+        store.kdf_parallelism,
+    )?;
 
     // First decrypt MK with PDK
     let mk_bytes = decrypt_field(
@@ -433,23 +477,28 @@ pub fn unlock_all_keys(
 }
 
 /// Default vault directory path.
-pub fn vault_dir() -> std::path::PathBuf {
+pub fn vault_dir() -> Result<std::path::PathBuf> {
     dirs::home_dir()
-        .expect("Cannot determine home directory")
-        .join(".zk-vault")
+        .map(|h| h.join(".zk-vault"))
+        .ok_or_else(|| {
+            VaultError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Cannot determine home directory",
+            ))
+        })
 }
 
 /// Path to the key store file.
-pub fn keystore_path() -> std::path::PathBuf {
-    vault_dir().join("keystore.json")
+pub fn keystore_path() -> Result<std::path::PathBuf> {
+    vault_dir().map(|d| d.join("keystore.json"))
 }
 
 /// Save an encrypted key store to disk.
 pub fn save_key_store(store: &EncryptedKeyStore) -> Result<()> {
-    let dir = vault_dir();
+    let dir = vault_dir()?;
     std::fs::create_dir_all(&dir).map_err(VaultError::Io)?;
 
-    let path = keystore_path();
+    let path = keystore_path()?;
     let json = serde_json::to_string_pretty(store)
         .map_err(|e| VaultError::Serialization(e.to_string()))?;
     std::fs::write(&path, json).map_err(VaultError::Io)?;
@@ -467,7 +516,7 @@ pub fn save_key_store(store: &EncryptedKeyStore) -> Result<()> {
 
 /// Load an encrypted key store from disk.
 pub fn load_key_store() -> Result<EncryptedKeyStore> {
-    let path = keystore_path();
+    let path = keystore_path()?;
     let json = std::fs::read_to_string(&path).map_err(VaultError::Io)?;
     serde_json::from_str(&json).map_err(|e| VaultError::Serialization(e.to_string()))
 }
@@ -543,6 +592,9 @@ mod tests {
             ed25519_pk: hex::encode(ed25519_kp.verifying_key.to_bytes()),
             keyfile_hash: keyfile.map(|kf| hex::encode(hash::hash(kf))),
             hwkey_enabled: hwkey_response.is_some(),
+            kdf_time_cost: 1,
+            kdf_memory_kib: 1024,
+            kdf_parallelism: 1,
         };
 
         (store, mnemonic_phrase)

@@ -9,9 +9,9 @@ use crate::crypto::sensitive::SensitiveBytes32;
 use crate::error::{Result, VaultError};
 
 /// Argon2id parameters matching the security specification.
-const ARGON2_TIME_COST: u32 = 3;
-const ARGON2_MEMORY_KIB: u32 = 262_144; // 256 MiB
-const ARGON2_PARALLELISM: u32 = 4;
+pub const ARGON2_TIME_COST: u32 = 3;
+pub const ARGON2_MEMORY_KIB: u32 = 262_144; // 256 MiB
+pub const ARGON2_PARALLELISM: u32 = 4;
 const SALT_LEN: usize = 32;
 
 /// Generate a random 32-byte salt.
@@ -72,6 +72,53 @@ pub fn derive_pdk(
     use zeroize::Zeroize;
     ikm.zeroize();
 
+    Ok(SensitiveBytes32::new(combined))
+}
+
+/// Derive a 32-byte key from a passphrase using Argon2id with explicit parameters.
+pub fn derive_key_with_params(
+    passphrase: &[u8],
+    salt: &[u8],
+    time_cost: u32,
+    memory_kib: u32,
+    parallelism: u32,
+) -> Result<SensitiveBytes32> {
+    let params = Params::new(memory_kib, time_cost, parallelism, Some(32))
+        .map_err(|e| VaultError::KeyDerivation(e.to_string()))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut output = [0u8; 32];
+    argon2
+        .hash_password_into(passphrase, salt, &mut output)
+        .map_err(|e| VaultError::KeyDerivation(e.to_string()))?;
+    Ok(SensitiveBytes32::new(output))
+}
+
+/// Derive PDK combining passphrase with optional keyfile and hardware key,
+/// using explicit Argon2id parameters.
+pub fn derive_pdk_with_params(
+    passphrase: &[u8],
+    salt: &[u8],
+    keyfile: Option<&[u8]>,
+    hwkey_response: Option<&[u8; 32]>,
+    time_cost: u32,
+    memory_kib: u32,
+    parallelism: u32,
+) -> Result<SensitiveBytes32> {
+    let base_pdk = derive_key_with_params(passphrase, salt, time_cost, memory_kib, parallelism)?;
+    if keyfile.is_none() && hwkey_response.is_none() {
+        return Ok(base_pdk);
+    }
+    let mut ikm = Vec::new();
+    ikm.extend_from_slice(base_pdk.as_bytes());
+    if let Some(kf) = keyfile {
+        ikm.extend_from_slice(kf);
+    }
+    if let Some(hw) = hwkey_response {
+        ikm.extend_from_slice(hw);
+    }
+    let combined = crate::crypto::hash::derive_key("zk-vault-pdk-combined-v1", &ikm);
+    use zeroize::Zeroize;
+    ikm.zeroize();
     Ok(SensitiveBytes32::new(combined))
 }
 

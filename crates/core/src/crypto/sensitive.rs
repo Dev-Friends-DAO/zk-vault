@@ -1,4 +1,5 @@
 /// Wrappers for sensitive key material that is automatically zeroized on drop.
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// A 32-byte sensitive value that is zeroized when dropped.
@@ -12,6 +13,11 @@ impl SensitiveBytes32 {
 
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    /// Constant-time equality comparison (timing-attack resistant).
+    pub fn ct_eq(&self, other: &Self) -> bool {
+        self.0.ct_eq(&other.0).into()
     }
 
     pub fn from_slice(slice: &[u8]) -> Option<Self> {
@@ -66,6 +72,15 @@ mod tests {
     fn test_sensitive_bytes32() {
         let key = SensitiveBytes32::new([0xAA; 32]);
         assert_eq!(key.as_bytes(), &[0xAA; 32]);
+    }
+
+    #[test]
+    fn test_sensitive_bytes32_ct_eq() {
+        let a = SensitiveBytes32::new([0xAA; 32]);
+        let b = SensitiveBytes32::new([0xAA; 32]);
+        let c = SensitiveBytes32::new([0xBB; 32]);
+        assert!(a.ct_eq(&b));
+        assert!(!a.ct_eq(&c));
     }
 
     #[test]
