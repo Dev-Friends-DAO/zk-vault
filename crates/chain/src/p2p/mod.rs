@@ -8,4 +8,5 @@
 //! - Kademlia: DHT-based peer discovery (production)
 
 pub mod message;
+pub mod peer_manager;
 pub mod transport;

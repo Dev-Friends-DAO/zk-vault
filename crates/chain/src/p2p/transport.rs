@@ -104,6 +104,11 @@ pub enum P2pCommand {
 }
 
 impl P2pHandle {
+    /// Create a new P2pHandle from a command sender channel.
+    pub fn new(cmd_tx: mpsc::Sender<P2pCommand>) -> Self {
+        Self { cmd_tx }
+    }
+
     pub async fn broadcast_consensus(&self, msg: ConsensusMessage) {
         let _ = self.cmd_tx.send(P2pCommand::BroadcastConsensus(msg)).await;
     }

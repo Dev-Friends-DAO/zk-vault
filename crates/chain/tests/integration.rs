@@ -2,6 +2,7 @@
 //!
 //! Each node has its own RPC server. Blocks are broadcast manually
 //! between nodes (simulating what Malachite consensus would do).
+//! Also includes consensus driver tests for BFT round simulation.
 
 use std::sync::{Arc, Mutex};
 
@@ -620,4 +621,282 @@ async fn anchor_status_super_merkle_tree() {
     // Super root is what would be anchored to BTC/ETH
     let super_root_hex = &super_roots[0];
     assert_eq!(super_root_hex.len(), 64); // 32 bytes = 64 hex chars
+}
+
+// ── I9: Consensus Driver Integration Tests ──
+
+/// Simulates 3-node BFT consensus using channels (no actual P2P).
+/// Validates: proposal broadcast, prevote/precommit signature verification,
+/// quorum detection, and state consistency across all nodes.
+#[tokio::test]
+async fn consensus_driver_three_node_bft_round() {
+    use ed25519_dalek::Signer;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, RwLock};
+    use zk_vault_chain::consensus::driver::{ConsensusConfig, ConsensusDriver};
+    use zk_vault_chain::consensus::engine::PoaEngine;
+    use zk_vault_chain::p2p::message::{ConsensusMessage, Proposal, Vote};
+    use zk_vault_chain::p2p::transport::{P2pCommand, P2pEvent, P2pHandle};
+    use zk_vault_chain::types::{Address, BlockId, Height, Round};
+
+    let keys: Vec<_> = (1..=3u8).map(make_keypair).collect();
+    let validators: Vec<_> = keys
+        .iter()
+        .map(|(_, pk)| zk_vault_chain::types::Validator::new(*pk, 100))
+        .collect();
+    let vs = ValidatorSet::new(validators);
+
+    // Create 3 nodes with shared validator set
+    struct TestNode {
+        driver: Option<ConsensusDriver>,
+        node: Arc<RwLock<zk_vault_chain::node::Node>>,
+        event_tx: mpsc::Sender<P2pEvent>,
+        cmd_rx: mpsc::Receiver<P2pCommand>,
+        _dir: tempfile::TempDir,
+    }
+
+    let mut test_nodes: Vec<TestNode> = Vec::new();
+
+    for (i, (sk, pk)) in keys.iter().enumerate() {
+        let config = zk_vault_chain::node::NodeConfig {
+            validator_address: Address::from_public_key(pk),
+            validator_pk: *pk,
+            mempool_config: zk_vault_chain::mempool::MempoolConfig::default(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(dir.path()).unwrap());
+        let node = Arc::new(RwLock::new(zk_vault_chain::node::Node::new(
+            vs.clone(),
+            config,
+            storage,
+        )));
+        let (cmd_tx, cmd_rx) = mpsc::channel(256);
+        let (event_tx, event_rx) = mpsc::channel(256);
+        let p2p = P2pHandle::new(cmd_tx);
+        let engine = PoaEngine::new(vs.clone());
+
+        let mut driver = ConsensusDriver::new(
+            Arc::clone(&node),
+            p2p,
+            Box::new(engine),
+            sk.clone(),
+            ConsensusConfig {
+                propose_timeout: std::time::Duration::from_secs(30),
+                prevote_timeout: std::time::Duration::from_secs(30),
+                precommit_timeout: std::time::Duration::from_secs(30),
+                timeout_delta: std::time::Duration::from_millis(0),
+            },
+        );
+
+        // We'll drive manually, not via run()
+        test_nodes.push(TestNode {
+            driver: Some(driver),
+            node,
+            event_tx,
+            cmd_rx,
+            _dir: dir,
+        });
+    }
+
+    // Determine who is proposer at height 1, round 0
+    // Formula: (height.0 + round.0) % validator_count
+    let proposer_idx = (1usize + 0usize) % 3;
+
+    // Submit a tx to the proposer's mempool
+    {
+        let (sk, pk) = &keys[0];
+        let tx = make_register_tx(sk, pk, [0xAA; 32]);
+        let mut node = test_nodes[proposer_idx].node.write().await;
+        node.submit_tx(tx).unwrap();
+    }
+    let proposer_addr = Address::from_public_key(&keys[proposer_idx].1);
+
+    // The proposer enters new round and proposes
+    let proposer = test_nodes[proposer_idx].driver.as_mut().unwrap();
+    proposer.enter_new_round().await;
+
+    // Drain the proposer's command channel to get the broadcast messages
+    let mut proposal_msg = None;
+    let mut proposer_prevote = None;
+    while let Ok(cmd) = test_nodes[proposer_idx].cmd_rx.try_recv() {
+        match cmd {
+            P2pCommand::BroadcastConsensus(ConsensusMessage::Proposal(p)) => {
+                proposal_msg = Some(ConsensusMessage::Proposal(p));
+            }
+            P2pCommand::BroadcastConsensus(ConsensusMessage::Prevote(v)) => {
+                proposer_prevote = Some(ConsensusMessage::Prevote(v));
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        proposal_msg.is_some(),
+        "Proposer should broadcast a proposal"
+    );
+    assert!(
+        proposer_prevote.is_some(),
+        "Proposer should broadcast a prevote"
+    );
+
+    // Step 2: Deliver the proposal to other nodes
+    for i in 0..3 {
+        if i == proposer_idx {
+            continue;
+        }
+        let driver = test_nodes[i].driver.as_mut().unwrap();
+        driver
+            .handle_event(P2pEvent::ConsensusMsg(proposal_msg.clone().unwrap()))
+            .await;
+        driver.drive_state().await;
+    }
+
+    // Collect prevotes from all non-proposer nodes
+    let mut all_prevotes = vec![proposer_prevote.unwrap()];
+    for i in 0..3 {
+        if i == proposer_idx {
+            continue;
+        }
+        while let Ok(cmd) = test_nodes[i].cmd_rx.try_recv() {
+            if let P2pCommand::BroadcastConsensus(msg @ ConsensusMessage::Prevote(_)) = cmd {
+                all_prevotes.push(msg);
+            }
+        }
+    }
+    assert_eq!(all_prevotes.len(), 3, "All 3 nodes should prevote");
+
+    // Step 3: Deliver all prevotes to all nodes
+    for i in 0..3 {
+        let driver = test_nodes[i].driver.as_mut().unwrap();
+        for prevote in &all_prevotes {
+            driver
+                .handle_event(P2pEvent::ConsensusMsg(prevote.clone()))
+                .await;
+        }
+        driver.drive_state().await;
+    }
+
+    // Collect precommits
+    let mut all_precommits = Vec::new();
+    for i in 0..3 {
+        while let Ok(cmd) = test_nodes[i].cmd_rx.try_recv() {
+            if let P2pCommand::BroadcastConsensus(msg @ ConsensusMessage::Precommit(_)) = cmd {
+                all_precommits.push(msg);
+            }
+        }
+    }
+    assert_eq!(all_precommits.len(), 3, "All 3 nodes should precommit");
+
+    // Step 4: Deliver all precommits to all nodes
+    for i in 0..3 {
+        let driver = test_nodes[i].driver.as_mut().unwrap();
+        for precommit in &all_precommits {
+            driver
+                .handle_event(P2pEvent::ConsensusMsg(precommit.clone()))
+                .await;
+        }
+        driver.drive_state().await;
+        // Drain remaining commands (block announce, etc.)
+        while test_nodes[i].cmd_rx.try_recv().is_ok() {}
+    }
+
+    // Step 5: Verify all nodes committed the same block
+    let mut heights = Vec::new();
+    let mut state_roots = Vec::new();
+    let mut file_counts = Vec::new();
+
+    for tn in &test_nodes {
+        let node = tn.node.read().await;
+        heights.push(node.height());
+        state_roots.push(node.state_root());
+        file_counts.push(node.state().file_count());
+    }
+
+    // All nodes at height 1
+    for h in &heights {
+        assert_eq!(*h, Height(1), "All nodes should be at height 1");
+    }
+
+    // Only the proposer's node had the tx in mempool, so it should have
+    // been included in the block. All nodes apply the same block.
+    for fc in &file_counts {
+        assert_eq!(
+            *fc, 1,
+            "All nodes should have 1 file after committing the block"
+        );
+    }
+
+    // State roots identical
+    assert_eq!(state_roots[0], state_roots[1]);
+    assert_eq!(state_roots[1], state_roots[2]);
+}
+
+/// Test that ConsensusDriver rejects proposals with invalid signatures.
+#[tokio::test]
+async fn consensus_driver_rejects_invalid_proposal_signature() {
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, RwLock};
+    use zk_vault_chain::consensus::driver::{ConsensusConfig, ConsensusDriver};
+    use zk_vault_chain::consensus::engine::PoaEngine;
+    use zk_vault_chain::p2p::message::{ConsensusMessage, Proposal};
+    use zk_vault_chain::p2p::transport::{P2pCommand, P2pEvent, P2pHandle};
+    use zk_vault_chain::types::{Address, Block, Height, Round};
+
+    let keys: Vec<_> = (1..=3u8).map(make_keypair).collect();
+    let validators: Vec<_> = keys
+        .iter()
+        .map(|(_, pk)| zk_vault_chain::types::Validator::new(*pk, 100))
+        .collect();
+    let vs = ValidatorSet::new(validators);
+
+    let (sk, pk) = &keys[0];
+    let config = zk_vault_chain::node::NodeConfig {
+        validator_address: Address::from_public_key(pk),
+        validator_pk: *pk,
+        mempool_config: zk_vault_chain::mempool::MempoolConfig::default(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(Storage::open(dir.path()).unwrap());
+    let node = Arc::new(RwLock::new(zk_vault_chain::node::Node::new(
+        vs.clone(),
+        config,
+        storage,
+    )));
+    let (cmd_tx, mut cmd_rx) = mpsc::channel(256);
+    let p2p = P2pHandle::new(cmd_tx);
+    let engine = PoaEngine::new(vs.clone());
+
+    let mut driver = ConsensusDriver::new(
+        Arc::clone(&node),
+        p2p,
+        Box::new(engine),
+        sk.clone(),
+        ConsensusConfig::default(),
+    );
+
+    // Create a proposal with invalid signature from the correct proposer
+    let proposer_idx = (1usize + 0usize) % 3;
+    let proposer_addr = Address::from_public_key(&keys[proposer_idx].1);
+
+    let fake_proposal = Proposal {
+        height: Height(1),
+        round: Round::ZERO,
+        block: Block::genesis(&vs),
+        pol_round: None,
+        proposer: proposer_addr,
+        signature: vec![0u8; 64], // invalid signature
+    };
+
+    // Deliver the fake proposal
+    driver
+        .handle_event(P2pEvent::ConsensusMsg(ConsensusMessage::Proposal(
+            fake_proposal,
+        )))
+        .await;
+    driver.drive_state().await;
+
+    // The driver should NOT have prevoted (no commands emitted)
+    assert!(
+        cmd_rx.try_recv().is_err(),
+        "Should not prevote for invalid proposal"
+    );
 }

@@ -1,6 +1,15 @@
 //! Malachite BFT Context implementation for the zk-vault chain.
 //!
 //! Maps our domain types to Malachite's trait system.
+//!
+//! Sub-modules:
+//! - [`engine`]: Consensus engine abstraction (PoA / DPoS)
+//! - [`vote_collector`]: Vote aggregation and quorum detection
+//! - [`driver`]: Async consensus driver event loop
+
+pub mod driver;
+pub mod engine;
+pub mod vote_collector;
 
 use informalsystems_malachitebft_core_types as malachite;
 
