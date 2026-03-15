@@ -36,6 +36,22 @@ tower-http = { version = "0.6", features = ["cors"] }
 # Malachite BFT consensus
 informalsystems-malachitebft-core-types = "0.5"
 
+# P2P networking
+libp2p = { version = "0.54", features = [
+    "gossipsub",
+    "request-response",
+    "cbor",
+    "noise",
+    "tcp",
+    "tokio",
+    "mdns",
+    "kad",
+    "macros",
+    "identify",
+    "yamux",
+] }
+futures = "0.3"
+
 [dev-dependencies]
 base64 = "0.22"
 reqwest = { version = "0.12", features = ["json"] }

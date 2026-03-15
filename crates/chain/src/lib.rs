@@ -12,6 +12,7 @@ pub mod blob_store;
 pub mod consensus;
 pub mod mempool;
 pub mod node;
+pub mod p2p;
 pub mod rpc;
 pub mod state;
 pub mod storage;
