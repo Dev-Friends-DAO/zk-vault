@@ -630,14 +630,13 @@ async fn anchor_status_super_merkle_tree() {
 /// quorum detection, and state consistency across all nodes.
 #[tokio::test]
 async fn consensus_driver_three_node_bft_round() {
-    use ed25519_dalek::Signer;
     use std::sync::Arc;
     use tokio::sync::{mpsc, RwLock};
     use zk_vault_chain::consensus::driver::{ConsensusConfig, ConsensusDriver};
     use zk_vault_chain::consensus::engine::PoaEngine;
-    use zk_vault_chain::p2p::message::{ConsensusMessage, Proposal, Vote};
+    use zk_vault_chain::p2p::message::ConsensusMessage;
     use zk_vault_chain::p2p::transport::{P2pCommand, P2pEvent, P2pHandle};
-    use zk_vault_chain::types::{Address, BlockId, Height, Round};
+    use zk_vault_chain::types::{Address, Height};
 
     let keys: Vec<_> = (1..=3u8).map(make_keypair).collect();
     let validators: Vec<_> = keys
@@ -650,14 +649,14 @@ async fn consensus_driver_three_node_bft_round() {
     struct TestNode {
         driver: Option<ConsensusDriver>,
         node: Arc<RwLock<zk_vault_chain::node::Node>>,
-        event_tx: mpsc::Sender<P2pEvent>,
+        _event_tx: mpsc::Sender<P2pEvent>,
         cmd_rx: mpsc::Receiver<P2pCommand>,
         _dir: tempfile::TempDir,
     }
 
     let mut test_nodes: Vec<TestNode> = Vec::new();
 
-    for (i, (sk, pk)) in keys.iter().enumerate() {
+    for (sk, pk) in &keys {
         let config = zk_vault_chain::node::NodeConfig {
             validator_address: Address::from_public_key(pk),
             validator_pk: *pk,
@@ -671,11 +670,11 @@ async fn consensus_driver_three_node_bft_round() {
             storage,
         )));
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
-        let (event_tx, event_rx) = mpsc::channel(256);
+        let (event_tx, _event_rx) = mpsc::channel(256);
         let p2p = P2pHandle::new(cmd_tx);
         let engine = PoaEngine::new(vs.clone());
 
-        let mut driver = ConsensusDriver::new(
+        let driver = ConsensusDriver::new(
             Arc::clone(&node),
             p2p,
             Box::new(engine),
@@ -692,7 +691,7 @@ async fn consensus_driver_three_node_bft_round() {
         test_nodes.push(TestNode {
             driver: Some(driver),
             node,
-            event_tx,
+            _event_tx: event_tx,
             cmd_rx,
             _dir: dir,
         });
@@ -700,7 +699,7 @@ async fn consensus_driver_three_node_bft_round() {
 
     // Determine who is proposer at height 1, round 0
     // Formula: (height.0 + round.0) % validator_count
-    let proposer_idx = (1usize + 0usize) % 3;
+    let proposer_idx = 1usize;
 
     // Submit a tx to the proposer's mempool
     {
@@ -709,8 +708,6 @@ async fn consensus_driver_three_node_bft_round() {
         let mut node = test_nodes[proposer_idx].node.write().await;
         node.submit_tx(tx).unwrap();
     }
-    let proposer_addr = Address::from_public_key(&keys[proposer_idx].1);
-
     // The proposer enters new round and proposes
     let proposer = test_nodes[proposer_idx].driver.as_mut().unwrap();
     proposer.enter_new_round().await;
@@ -739,11 +736,11 @@ async fn consensus_driver_three_node_bft_round() {
     );
 
     // Step 2: Deliver the proposal to other nodes
-    for i in 0..3 {
+    for (i, tn) in test_nodes.iter_mut().enumerate() {
         if i == proposer_idx {
             continue;
         }
-        let driver = test_nodes[i].driver.as_mut().unwrap();
+        let driver = tn.driver.as_mut().unwrap();
         driver
             .handle_event(P2pEvent::ConsensusMsg(proposal_msg.clone().unwrap()))
             .await;
@@ -752,11 +749,11 @@ async fn consensus_driver_three_node_bft_round() {
 
     // Collect prevotes from all non-proposer nodes
     let mut all_prevotes = vec![proposer_prevote.unwrap()];
-    for i in 0..3 {
+    for (i, tn) in test_nodes.iter_mut().enumerate() {
         if i == proposer_idx {
             continue;
         }
-        while let Ok(cmd) = test_nodes[i].cmd_rx.try_recv() {
+        while let Ok(cmd) = tn.cmd_rx.try_recv() {
             if let P2pCommand::BroadcastConsensus(msg @ ConsensusMessage::Prevote(_)) = cmd {
                 all_prevotes.push(msg);
             }
@@ -765,8 +762,8 @@ async fn consensus_driver_three_node_bft_round() {
     assert_eq!(all_prevotes.len(), 3, "All 3 nodes should prevote");
 
     // Step 3: Deliver all prevotes to all nodes
-    for i in 0..3 {
-        let driver = test_nodes[i].driver.as_mut().unwrap();
+    for tn in &mut test_nodes {
+        let driver = tn.driver.as_mut().unwrap();
         for prevote in &all_prevotes {
             driver
                 .handle_event(P2pEvent::ConsensusMsg(prevote.clone()))
@@ -777,8 +774,8 @@ async fn consensus_driver_three_node_bft_round() {
 
     // Collect precommits
     let mut all_precommits = Vec::new();
-    for i in 0..3 {
-        while let Ok(cmd) = test_nodes[i].cmd_rx.try_recv() {
+    for tn in &mut test_nodes {
+        while let Ok(cmd) = tn.cmd_rx.try_recv() {
             if let P2pCommand::BroadcastConsensus(msg @ ConsensusMessage::Precommit(_)) = cmd {
                 all_precommits.push(msg);
             }
@@ -787,8 +784,8 @@ async fn consensus_driver_three_node_bft_round() {
     assert_eq!(all_precommits.len(), 3, "All 3 nodes should precommit");
 
     // Step 4: Deliver all precommits to all nodes
-    for i in 0..3 {
-        let driver = test_nodes[i].driver.as_mut().unwrap();
+    for tn in &mut test_nodes {
+        let driver = tn.driver.as_mut().unwrap();
         for precommit in &all_precommits {
             driver
                 .handle_event(P2pEvent::ConsensusMsg(precommit.clone()))
@@ -796,7 +793,7 @@ async fn consensus_driver_three_node_bft_round() {
         }
         driver.drive_state().await;
         // Drain remaining commands (block announce, etc.)
-        while test_nodes[i].cmd_rx.try_recv().is_ok() {}
+        while tn.cmd_rx.try_recv().is_ok() {}
     }
 
     // Step 5: Verify all nodes committed the same block
@@ -838,7 +835,7 @@ async fn consensus_driver_rejects_invalid_proposal_signature() {
     use zk_vault_chain::consensus::driver::{ConsensusConfig, ConsensusDriver};
     use zk_vault_chain::consensus::engine::PoaEngine;
     use zk_vault_chain::p2p::message::{ConsensusMessage, Proposal};
-    use zk_vault_chain::p2p::transport::{P2pCommand, P2pEvent, P2pHandle};
+    use zk_vault_chain::p2p::transport::{P2pEvent, P2pHandle};
     use zk_vault_chain::types::{Address, Block, Height, Round};
 
     let keys: Vec<_> = (1..=3u8).map(make_keypair).collect();
@@ -874,7 +871,7 @@ async fn consensus_driver_rejects_invalid_proposal_signature() {
     );
 
     // Create a proposal with invalid signature from the correct proposer
-    let proposer_idx = (1usize + 0usize) % 3;
+    let proposer_idx = 1usize;
     let proposer_addr = Address::from_public_key(&keys[proposer_idx].1);
 
     let fake_proposal = Proposal {
