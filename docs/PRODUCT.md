@@ -323,6 +323,8 @@ The previous architecture relied on a centralized API server and PostgreSQL data
 
 ### Consensus
 
+The consensus layer is built on a pluggable `ValidatorSelector` trait, allowing the chain to operate under **either** PoA or DPoS at any time. The long-term product direction is PoA → DPoS, but the architecture ensures both engines remain available and switchable via governance.
+
 **Initial phase: PoA (Proof of Authority)**
 - 3-7 known validators
 - BFT consensus (tolerates < 1/3 Byzantine validators)
@@ -334,7 +336,7 @@ The previous architecture relied on a centralized API server and PostgreSQL data
 - Permissionless participation
 - Economic security via slashing
 
-The specific BFT implementation (CometBFT, GRANDPA, or other) is to be determined based on the chain framework selected.
+> **Design principle**: The `ConsensusDriver` depends only on the `ValidatorSelector` trait, not on a specific engine. Both `PoaEngine` and `DposEngine` implement this trait. This means the chain can revert from DPoS back to PoA if needed (e.g., emergency governance), or run different engines on different networks (testnet vs mainnet).
 
 ### Chain Modules
 

@@ -88,16 +88,24 @@ impl ValidatorSelector for PoaEngine {
     }
 }
 
-// ── Future: DPoS Engine (stub) ──
+// ── Design note: Pluggable consensus engines ──
 //
-// When DPoS is implemented, it will:
+// The ValidatorSelector trait is the abstraction boundary between the
+// consensus driver and the validator selection strategy. Both PoaEngine
+// and a future DposEngine implement this trait, making them
+// interchangeable at runtime.
+//
+// Product direction: PoA → DPoS as the network matures.
+// Code design: Either engine can be used at any time. The chain can
+// operate under PoA, transition to DPoS via governance, or revert
+// back if needed. The ConsensusDriver and PeerManager are agnostic
+// to which engine is active.
+//
+// Future DposEngine will:
 // - Read staking state from ChainState
 // - Select top N validators by delegated stake
 // - Rotate validator set at epoch boundaries
 // - Implement slashing for Byzantine behaviour
-//
-// The ConsensusDriver and PeerManager will work identically because
-// they depend only on the ValidatorSelector trait.
 
 #[cfg(test)]
 mod tests {
