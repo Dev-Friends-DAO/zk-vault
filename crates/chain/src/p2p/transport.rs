@@ -17,8 +17,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::message::{
-    BlockAnnounce, ConsensusMessage, NetworkMessage, SyncRequest, SyncResponse, TxGossip,
-    SYNC_PROTOCOL, TOPIC_BLOCK, TOPIC_CONSENSUS, TOPIC_TX,
+    BlobReplicationRequest, BlobReplicationResponse, BlockAnnounce, ConsensusMessage,
+    NetworkMessage, SyncRequest, SyncResponse, TxGossip, BLOB_REPL_PROTOCOL, SYNC_PROTOCOL,
+    TOPIC_BLOCK, TOPIC_CONSENSUS, TOPIC_TX,
 };
 use crate::types::Transaction;
 
@@ -42,13 +43,12 @@ pub struct P2pConfig {
 /// The combined network behaviour for zk-vault nodes.
 #[derive(NetworkBehaviour)]
 pub struct ZkVaultBehaviour {
-    /// Gossipsub for consensus messages, tx gossip, block announcements.
     pub gossipsub: gossipsub::Behaviour,
-    /// Request-response for block sync.
     pub sync: request_response::cbor::Behaviour<SyncRequest, SyncResponse>,
-    /// mDNS for local peer discovery.
+    /// Request-response for blob replication between validators.
+    pub blob_repl:
+        request_response::cbor::Behaviour<BlobReplicationRequest, BlobReplicationResponse>,
     pub mdns: mdns::tokio::Behaviour,
-    /// Identify protocol for peer metadata exchange.
     pub identify: libp2p::identify::Behaviour,
 }
 
@@ -70,6 +70,13 @@ pub enum P2pEvent {
     },
     /// Received a sync response.
     SyncResponse(SyncResponse),
+    /// Received a blob replication request from a peer.
+    BlobReplicationRequest {
+        request: BlobReplicationRequest,
+        channel: request_response::ResponseChannel<BlobReplicationResponse>,
+    },
+    /// Received a blob replication response.
+    BlobReplicationResponse(BlobReplicationResponse),
     /// A new peer connected.
     PeerConnected(PeerId),
     /// A peer disconnected.
@@ -100,6 +107,16 @@ pub enum P2pCommand {
     SendSyncResponse {
         channel: request_response::ResponseChannel<SyncResponse>,
         response: SyncResponse,
+    },
+    /// Send a blob replication request to a specific peer.
+    SendBlobReplRequest {
+        peer: PeerId,
+        request: BlobReplicationRequest,
+    },
+    /// Send a blob replication response.
+    SendBlobReplResponse {
+        channel: request_response::ResponseChannel<BlobReplicationResponse>,
+        response: BlobReplicationResponse,
     },
 }
 
@@ -138,6 +155,24 @@ impl P2pHandle {
             .send(P2pCommand::SendSyncResponse { channel, response })
             .await;
     }
+
+    pub async fn send_blob_repl_request(&self, peer: PeerId, request: BlobReplicationRequest) {
+        let _ = self
+            .cmd_tx
+            .send(P2pCommand::SendBlobReplRequest { peer, request })
+            .await;
+    }
+
+    pub async fn send_blob_repl_response(
+        &self,
+        channel: request_response::ResponseChannel<BlobReplicationResponse>,
+        response: BlobReplicationResponse,
+    ) {
+        let _ = self
+            .cmd_tx
+            .send(P2pCommand::SendBlobReplResponse { channel, response })
+            .await;
+    }
 }
 
 // ── Build Swarm ──
@@ -173,6 +208,15 @@ pub fn build_swarm(
         request_response::Config::default().with_request_timeout(Duration::from_secs(30)),
     );
 
+    // Request-response for blob replication
+    let blob_repl = request_response::cbor::Behaviour::new(
+        [(
+            StreamProtocol::new(BLOB_REPL_PROTOCOL),
+            ProtocolSupport::Full,
+        )],
+        request_response::Config::default().with_request_timeout(Duration::from_secs(120)),
+    );
+
     // mDNS for local discovery
     let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
 
@@ -185,6 +229,7 @@ pub fn build_swarm(
     let behaviour = ZkVaultBehaviour {
         gossipsub,
         sync,
+        blob_repl,
         mdns,
         identify,
     };
@@ -282,6 +327,14 @@ pub async fn run_p2p(
                                 debug!("Failed to send sync response");
                             }
                         }
+                        P2pCommand::SendBlobReplRequest { peer, request } => {
+                            swarm.behaviour_mut().blob_repl.send_request(&peer, request);
+                        }
+                        P2pCommand::SendBlobReplResponse { channel, response } => {
+                            if swarm.behaviour_mut().blob_repl.send_response(channel, response).is_err() {
+                                debug!("Failed to send blob replication response");
+                            }
+                        }
                     }
                 }
 
@@ -315,6 +368,18 @@ pub async fn run_p2p(
                                 }
                                 request_response::Message::Response { response, .. } => {
                                     let _ = event_tx.send(P2pEvent::SyncResponse(response)).await;
+                                }
+                            }
+                        }
+                        libp2p::swarm::SwarmEvent::Behaviour(ZkVaultBehaviourEvent::BlobRepl(
+                            request_response::Event::Message { message, .. }
+                        )) => {
+                            match message {
+                                request_response::Message::Request { request, channel, .. } => {
+                                    let _ = event_tx.send(P2pEvent::BlobReplicationRequest { request, channel }).await;
+                                }
+                                request_response::Message::Response { response, .. } => {
+                                    let _ = event_tx.send(P2pEvent::BlobReplicationResponse(response)).await;
                                 }
                             }
                         }

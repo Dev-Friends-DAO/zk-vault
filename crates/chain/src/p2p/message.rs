@@ -21,6 +21,9 @@ pub const TOPIC_BLOCK: &str = "/zkvault/block/1";
 /// Request-response protocol for block sync.
 pub const SYNC_PROTOCOL: &str = "/zkvault/sync/1";
 
+/// Request-response protocol for blob replication.
+pub const BLOB_REPL_PROTOCOL: &str = "/zkvault/blob-repl/1";
+
 // ── Consensus Messages ──
 
 /// A consensus message broadcast via gossipsub.
@@ -154,6 +157,58 @@ pub enum SyncResponse {
     NotFound { height: Height },
     /// Error.
     Error(String),
+}
+
+// ── Blob Replication (Request-Response) ──
+
+/// Request for blob replication between validators.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BlobReplicationRequest {
+    /// Push a blob to a peer for replication.
+    ReplicateBlob {
+        key: String,
+        data: Vec<u8>,
+        data_hash: [u8; 32],
+    },
+    /// Request a blob from a peer.
+    GetBlob { key: String },
+    /// Request the list of blob keys a peer holds.
+    ListBlobs,
+}
+
+/// Response for blob replication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BlobReplicationResponse {
+    /// Acknowledgement of successful replication.
+    Ack { key: String, stored: bool },
+    /// Blob data in response to GetBlob.
+    BlobData { key: String, data: Vec<u8> },
+    /// List of blob keys the peer holds.
+    BlobKeys(Vec<String>),
+    /// Blob not found.
+    NotFound { key: String },
+    /// Error.
+    Error(String),
+}
+
+impl BlobReplicationRequest {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(bytes)
+    }
+}
+
+impl BlobReplicationResponse {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(bytes)
+    }
 }
 
 // ── Wire Envelope ──

@@ -44,6 +44,7 @@ async fn main() {
         validator_address: Address::from_public_key(&keys[0].1),
         validator_pk: keys[0].1,
         mempool_config: MempoolConfig::default(),
+        replication_factor: 3,
     };
 
     let data_dir = std::env::current_dir().unwrap().join(".zk-vault-data");

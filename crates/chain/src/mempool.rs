@@ -280,6 +280,24 @@ fn pre_validate(tx: &Transaction, state: &ChainState) -> Result<()> {
             let msg_hash = blake3::hash(&msg);
             verify_ed25519_quick(owner_pk, msg_hash.as_bytes(), signature)?;
         }
+
+        Transaction::UpdateStorageStatus {
+            validator_pk,
+            blob_key,
+            holds_blob,
+            signature,
+        } => {
+            if signature.is_empty() {
+                return Err(MempoolError::Invalid("empty signature".to_string()));
+            }
+            // Verify signature over domain-separated message
+            let mut msg = Vec::new();
+            msg.extend_from_slice(b"zk-vault:storage-status:");
+            msg.extend_from_slice(blob_key.as_bytes());
+            msg.push(if *holds_blob { 1 } else { 0 });
+            let msg_hash = blake3::hash(&msg);
+            verify_ed25519_quick(validator_pk, msg_hash.as_bytes(), signature)?;
+        }
     }
     Ok(())
 }

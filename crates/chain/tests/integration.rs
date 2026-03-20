@@ -60,6 +60,7 @@ impl TestNetwork {
                 validator_address: Address::from_public_key(pk),
                 validator_pk: *pk,
                 mempool_config: MempoolConfig::default(),
+                replication_factor: 3,
             };
             let dir = tempfile::tempdir().unwrap();
             let storage = Arc::new(Storage::open(dir.path()).unwrap());
@@ -661,6 +662,7 @@ async fn consensus_driver_three_node_bft_round() {
             validator_address: Address::from_public_key(pk),
             validator_pk: *pk,
             mempool_config: zk_vault_chain::mempool::MempoolConfig::default(),
+            replication_factor: 3,
         };
         let dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(Storage::open(dir.path()).unwrap());
@@ -850,6 +852,7 @@ async fn consensus_driver_rejects_invalid_proposal_signature() {
         validator_address: Address::from_public_key(pk),
         validator_pk: *pk,
         mempool_config: zk_vault_chain::mempool::MempoolConfig::default(),
+        replication_factor: 3,
     };
     let dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(Storage::open(dir.path()).unwrap());
@@ -896,4 +899,212 @@ async fn consensus_driver_rejects_invalid_proposal_signature() {
         cmd_rx.try_recv().is_err(),
         "Should not prevote for invalid proposal"
     );
+}
+
+/// J7: Blob replication and retrieval after node failure.
+///
+/// Tests the full Mode B replication flow:
+/// 1. Upload blob to node 0
+/// 2. Simulate replication to nodes 1 and 2 (direct blob copy)
+/// 3. Verify all nodes have the blob
+/// 4. "Stop" node 0 (don't query it)
+/// 5. Successfully retrieve from nodes 1 and 2
+#[tokio::test]
+async fn blob_replication_and_retrieval_after_node_failure() {
+    use base64::Engine;
+
+    let net = TestNetwork::spawn(3).await;
+    let client = reqwest::Client::new();
+
+    // 1. Upload blob to node 0
+    let blob_data: Vec<u8> = (0..256).map(|i| (i % 256) as u8).collect();
+    let data_b64 = base64::engine::general_purpose::STANDARD.encode(&blob_data);
+
+    let resp = client
+        .post(format!("{}/upload_data", net.urls[0]))
+        .json(&rpc::UploadDataRequest {
+            key: "repl-test-blob".to_string(),
+            data_b64: data_b64.clone(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let upload: rpc::UploadDataResponse = resp.json().await.unwrap();
+    assert_eq!(upload.size, 256);
+
+    // 2. Simulate replication: copy blob from node 0 to nodes 1 and 2
+    {
+        let data = net.nodes[0]
+            .lock()
+            .unwrap()
+            .get_blob("repl-test-blob")
+            .unwrap()
+            .unwrap();
+        net.nodes[1]
+            .lock()
+            .unwrap()
+            .put_blob("repl-test-blob".to_string(), data.clone())
+            .unwrap();
+        net.nodes[2]
+            .lock()
+            .unwrap()
+            .put_blob("repl-test-blob".to_string(), data)
+            .unwrap();
+    }
+
+    // 3. Verify all nodes have the blob via RPC
+    for url in &net.urls {
+        let resp = client
+            .post(format!("{url}/download_data"))
+            .json(&rpc::DownloadDataRequest {
+                key: "repl-test-blob".to_string(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let download: rpc::DownloadDataResponse = resp.json().await.unwrap();
+        assert_eq!(download.size, 256);
+    }
+
+    // 4. "Stop" node 0 — simulate failure by only querying nodes 1 and 2
+
+    // 5. Retrieve from node 1
+    let resp = client
+        .post(format!("{}/download_data", net.urls[1]))
+        .json(&rpc::DownloadDataRequest {
+            key: "repl-test-blob".to_string(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let download: rpc::DownloadDataResponse = resp.json().await.unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&download.data_b64)
+        .unwrap();
+    assert_eq!(decoded, blob_data, "Node 1 should return identical data");
+
+    // 6. Retrieve from node 2
+    let resp = client
+        .post(format!("{}/download_data", net.urls[2]))
+        .json(&rpc::DownloadDataRequest {
+            key: "repl-test-blob".to_string(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let download: rpc::DownloadDataResponse = resp.json().await.unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&download.data_b64)
+        .unwrap();
+    assert_eq!(decoded, blob_data, "Node 2 should return identical data");
+
+    // 7. Verify blob is NOT on a non-existent key
+    let resp = client
+        .post(format!("{}/download_data", net.urls[1]))
+        .json(&rpc::DownloadDataRequest {
+            key: "nonexistent-blob".to_string(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+/// J7: Storage attestation transaction round-trip.
+///
+/// Tests that UpdateStorageStatus transactions are properly processed:
+/// 1. Validator submits UpdateStorageStatus tx
+/// 2. After block commit, blob_replicas state is updated
+#[tokio::test]
+async fn storage_attestation_tx_roundtrip() {
+    let net = TestNetwork::spawn(3).await;
+    let (sk, pk) = &net.keys[0];
+
+    // Submit UpdateStorageStatus tx
+    let blob_key = "user1/backup-001";
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"zk-vault:storage-status:");
+    msg.extend_from_slice(blob_key.as_bytes());
+    msg.push(1u8); // holds_blob = true
+    let msg_hash = blake3::hash(&msg);
+    let sig = sk.sign(msg_hash.as_bytes());
+
+    let tx = Transaction::UpdateStorageStatus {
+        blob_key: blob_key.to_string(),
+        validator_pk: *pk,
+        holds_blob: true,
+        signature: sig.to_bytes().to_vec(),
+    };
+
+    net.nodes[0].lock().unwrap().submit_tx(tx).unwrap();
+    net.propose_and_broadcast();
+
+    // Verify blob_replicas state on all nodes
+    for node in &net.nodes {
+        let n = node.lock().unwrap();
+        let state = n.state();
+        let replicas = state.blob_replicas.get("user1/backup-001");
+        assert!(replicas.is_some(), "blob_replicas should have the entry");
+        assert!(
+            replicas.unwrap().contains(pk),
+            "validator pk should be in replicas"
+        );
+    }
+
+    // Verify state roots match across all nodes
+    let roots: Vec<_> = net
+        .nodes
+        .iter()
+        .map(|n| n.lock().unwrap().state_root())
+        .collect();
+    assert_eq!(roots[0], roots[1]);
+    assert_eq!(roots[1], roots[2]);
+}
+
+/// J5: Block history store round-trip.
+///
+/// Tests that committed blocks are persisted and retrievable.
+#[tokio::test]
+async fn block_history_store_roundtrip() {
+    let net = TestNetwork::spawn(3).await;
+    let (sk, pk) = &net.keys[0];
+
+    // Commit 3 blocks
+    for i in 0..3u8 {
+        let mut root = [0u8; 32];
+        root[0] = i + 100;
+        let tx = make_register_tx(sk, pk, root);
+        net.nodes[0].lock().unwrap().submit_tx(tx).unwrap();
+        net.propose_and_broadcast();
+    }
+
+    // Verify all nodes are at height 3
+    for node in &net.nodes {
+        assert_eq!(node.lock().unwrap().height().0, 3);
+    }
+
+    // Retrieve blocks from history on node 0
+    let n = net.nodes[0].lock().unwrap();
+    for h in 1..=3u64 {
+        let block = n.get_block(zk_vault_chain::types::Height(h)).unwrap();
+        assert!(block.is_some(), "Block at height {h} should exist");
+        let block = block.unwrap();
+        assert_eq!(block.header.height.0, h);
+        assert_eq!(block.transactions.len(), 1);
+    }
+
+    // Block at height 0 (genesis) was not stored via on_decided
+    let genesis = n.get_block(zk_vault_chain::types::Height(0)).unwrap();
+    assert!(
+        genesis.is_none(),
+        "Genesis block is not stored via on_decided"
+    );
+
+    // Block at height 99 doesn't exist
+    let missing = n.get_block(zk_vault_chain::types::Height(99)).unwrap();
+    assert!(missing.is_none());
 }

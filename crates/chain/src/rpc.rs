@@ -12,6 +12,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
+use crate::blob_sync::BlobSyncManager;
 use crate::node::Node;
 
 // ── Shared state ──
@@ -183,6 +184,13 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// RPC state with optional blob sync manager for peer retrieval.
+#[derive(Clone)]
+pub struct RpcState {
+    pub node: SharedNode,
+    pub blob_sync: Option<Arc<tokio::sync::RwLock<BlobSyncManager>>>,
+}
+
 // ── Router ──
 
 /// Build the axum router with all RPC endpoints.
@@ -208,6 +216,33 @@ pub async fn serve(node: SharedNode, addr: &str) -> std::io::Result<()> {
     let app = router(node);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(addr, "RPC server listening");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Build the axum router with blob sync support for peer retrieval.
+pub fn router_with_sync(state: RpcState) -> Router {
+    Router::new()
+        .route("/status", get(handle_status_v2))
+        .route("/submit_tx", post(handle_submit_tx_v2))
+        .route("/get_file", post(handle_get_file_v2))
+        .route("/propose", post(handle_propose_v2))
+        .route("/upload_data", post(handle_upload_data_v2))
+        .route("/download_data", post(handle_download_data_v2))
+        .route("/list_data", get(handle_list_data_v2))
+        .route("/anchor_status", get(handle_anchor_status_v2))
+        .route("/health", get(handle_health))
+        .route("/get_guardians", post(handle_get_guardians_v2))
+        .route("/get_recovery_status", post(handle_get_recovery_status_v2))
+        .route("/get_key_status", post(handle_get_key_status_v2))
+        .with_state(state)
+}
+
+/// Start the RPC server with blob sync support.
+pub async fn serve_with_sync(state: RpcState, addr: &str) -> std::io::Result<()> {
+    let app = router_with_sync(state);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!(addr, "RPC server listening (with blob sync)");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -590,6 +625,146 @@ async fn handle_list_data(
     Ok(Json(ListDataResponse { keys, total_size }))
 }
 
+// ── V2 handlers (extract node from RpcState) ──
+
+async fn handle_status_v2(State(state): State<RpcState>) -> Json<StatusResponse> {
+    handle_status(State(state.node)).await
+}
+
+async fn handle_submit_tx_v2(
+    State(state): State<RpcState>,
+    body: Json<SubmitTxRequest>,
+) -> Result<Json<SubmitTxResponse>, (StatusCode, Json<ErrorResponse>)> {
+    handle_submit_tx(State(state.node), body).await
+}
+
+async fn handle_get_file_v2(
+    State(state): State<RpcState>,
+    body: Json<GetFileRequest>,
+) -> Result<Json<FileResponse>, (StatusCode, Json<ErrorResponse>)> {
+    handle_get_file(State(state.node), body).await
+}
+
+async fn handle_propose_v2(
+    State(state): State<RpcState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    handle_propose(State(state.node)).await
+}
+
+async fn handle_upload_data_v2(
+    State(state): State<RpcState>,
+    Json(req): Json<UploadDataRequest>,
+) -> Result<Json<UploadDataResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(&req.data_b64)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Invalid base64: {e}"),
+                }),
+            )
+        })?;
+
+    let size = {
+        let mut node = state.node.lock().unwrap();
+        node.put_blob(req.key.clone(), data.clone()).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?
+    };
+    info!(key = %req.key, size, "blob uploaded");
+
+    // Trigger replication to peers
+    if let Some(blob_sync) = &state.blob_sync {
+        let sync = blob_sync.read().await;
+        sync.replicate_blob(&req.key, &data).await;
+    }
+
+    Ok(Json(UploadDataResponse { key: req.key, size }))
+}
+
+async fn handle_download_data_v2(
+    State(state): State<RpcState>,
+    Json(req): Json<DownloadDataRequest>,
+) -> Result<Json<DownloadDataResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use base64::Engine;
+
+    // Try local first
+    let local_data = {
+        let node = state.node.lock().unwrap();
+        node.get_blob(&req.key).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?
+    };
+
+    let data = match local_data {
+        Some(data) => data,
+        None => {
+            // Blob not found locally — in a full P2P implementation,
+            // we would query peers via BlobSyncManager here.
+            // For now, return 404 (peer retrieval requires async P2P
+            // round-trip which is handled by ConsensusDriver events).
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Blob not found: {}", req.key),
+                }),
+            ));
+        }
+    };
+
+    let size = data.len();
+    let data_b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+
+    Ok(Json(DownloadDataResponse {
+        key: req.key,
+        data_b64,
+        size,
+    }))
+}
+
+async fn handle_list_data_v2(
+    State(state): State<RpcState>,
+) -> Result<Json<ListDataResponse>, (StatusCode, Json<ErrorResponse>)> {
+    handle_list_data(State(state.node)).await
+}
+
+async fn handle_anchor_status_v2(State(state): State<RpcState>) -> Json<AnchorStatusResponse> {
+    handle_anchor_status(State(state.node)).await
+}
+
+async fn handle_get_guardians_v2(
+    State(state): State<RpcState>,
+    body: Json<GetGuardiansRequest>,
+) -> Result<Json<GetGuardiansResponse>, (StatusCode, Json<ErrorResponse>)> {
+    handle_get_guardians(State(state.node), body).await
+}
+
+async fn handle_get_recovery_status_v2(
+    State(state): State<RpcState>,
+    body: Json<GetRecoveryStatusRequest>,
+) -> Result<Json<GetRecoveryStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    handle_get_recovery_status(State(state.node), body).await
+}
+
+async fn handle_get_key_status_v2(
+    State(state): State<RpcState>,
+    body: Json<GetKeyStatusRequest>,
+) -> Result<Json<GetKeyStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    handle_get_key_status(State(state.node), body).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,6 +793,7 @@ mod tests {
             validator_address: Address::from_public_key(&keys[0].1),
             validator_pk: keys[0].1,
             mempool_config: MempoolConfig::default(),
+            replication_factor: 3,
         };
 
         let dir = tempfile::tempdir().unwrap();

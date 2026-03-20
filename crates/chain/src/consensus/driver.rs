@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
+use crate::blob_sync::BlobSyncManager;
 use crate::consensus::engine::ValidatorSelector;
 use crate::consensus::vote_collector::VoteCollector;
 use crate::node::Node;
@@ -96,6 +97,9 @@ pub struct ConsensusDriver {
 
     /// Timeout configuration.
     config: ConsensusConfig,
+
+    /// Optional blob sync manager for handling replication events.
+    blob_sync: Option<Arc<RwLock<BlobSyncManager>>>,
 }
 
 impl ConsensusDriver {
@@ -139,7 +143,13 @@ impl ConsensusDriver {
             precommits,
             peer_manager,
             config,
+            blob_sync: None,
         }
+    }
+
+    /// Set the blob sync manager for handling replication events.
+    pub fn set_blob_sync(&mut self, sync: Arc<RwLock<BlobSyncManager>>) {
+        self.blob_sync = Some(sync);
     }
 
     /// Run the consensus event loop. This method never returns under
@@ -332,6 +342,34 @@ impl ConsensusDriver {
             }
             P2pEvent::PeerDisconnected(peer_id) => {
                 self.peer_manager.on_peer_disconnected(&peer_id);
+            }
+            P2pEvent::BlobReplicationRequest { request, channel } => {
+                if let Some(sync) = &self.blob_sync {
+                    let sync = sync.read().await;
+                    let response = sync.handle_request(request).await;
+                    self.p2p.send_blob_repl_response(channel, response).await;
+                }
+            }
+            P2pEvent::BlobReplicationResponse(response) => {
+                if let Some(sync) = &self.blob_sync {
+                    match response {
+                        crate::p2p::message::BlobReplicationResponse::BlobKeys(keys) => {
+                            // Find which peer sent this (use first connected peer as fallback)
+                            let peer = self.peer_manager.connected_peers().first().copied();
+                            if let Some(peer) = peer {
+                                let sync = sync.read().await;
+                                sync.handle_blob_list(peer, keys).await;
+                            }
+                        }
+                        crate::p2p::message::BlobReplicationResponse::BlobData { key, data } => {
+                            let sync = sync.read().await;
+                            sync.handle_blob_data(key, data).await;
+                        }
+                        _ => {
+                            debug!("Blob replication response: {:?}", response);
+                        }
+                    }
+                }
             }
         }
     }
@@ -559,15 +597,20 @@ impl ConsensusDriver {
                     height: node.height(),
                     last_block_id: node.last_block_id(),
                 },
-                SyncRequest::GetBlock { height } => {
-                    // TODO: Add block history storage for full sync support.
-                    SyncResponse::NotFound { height }
-                }
+                SyncRequest::GetBlock { height } => match node.get_block(height) {
+                    Ok(Some(block)) => SyncResponse::Block(block),
+                    Ok(None) => SyncResponse::NotFound { height },
+                    Err(e) => SyncResponse::Error(e.to_string()),
+                },
                 SyncRequest::GetBlocks {
                     from_height,
-                    to_height: _,
-                } => SyncResponse::NotFound {
-                    height: from_height,
+                    to_height,
+                } => match node.get_blocks(from_height, to_height) {
+                    Ok(blocks) if blocks.is_empty() => SyncResponse::NotFound {
+                        height: from_height,
+                    },
+                    Ok(blocks) => SyncResponse::Blocks(blocks),
+                    Err(e) => SyncResponse::Error(e.to_string()),
                 },
             }
         };
@@ -812,6 +855,7 @@ mod tests {
             validator_address: Address::from_public_key(&pk),
             validator_pk: pk,
             mempool_config: MempoolConfig::default(),
+            replication_factor: 3,
         };
         let node = Arc::new(RwLock::new(Node::new(vs, config, storage)));
         let (cmd_tx, _) = mpsc::channel(16);
@@ -849,6 +893,7 @@ mod tests {
             validator_address: Address::from_public_key(&pk),
             validator_pk: pk,
             mempool_config: MempoolConfig::default(),
+            replication_factor: 3,
         };
         let node = Arc::new(RwLock::new(Node::new(vs, config, storage)));
         let (cmd_tx, _) = mpsc::channel(16);
@@ -880,6 +925,7 @@ mod tests {
             validator_address: Address::from_public_key(&pk),
             validator_pk: pk,
             mempool_config: MempoolConfig::default(),
+            replication_factor: 3,
         };
         let node = Arc::new(RwLock::new(Node::new(vs, config, storage)));
         let (cmd_tx, _) = mpsc::channel(16);
@@ -904,6 +950,7 @@ mod tests {
             validator_address: Address::from_public_key(&pk),
             validator_pk: pk,
             mempool_config: MempoolConfig::default(),
+            replication_factor: 3,
         };
         let node = Arc::new(RwLock::new(Node::new(vs, config, storage)));
         let (cmd_tx, mut cmd_rx) = mpsc::channel(256);

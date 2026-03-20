@@ -24,6 +24,8 @@ const CF_FILES: &str = "files";
 const CF_GUARDIANS: &str = "guardians";
 const CF_RECOVERY: &str = "recovery";
 const CF_KEYS: &str = "keys";
+const CF_BLOB_REPLICAS: &str = "blob_replicas";
+const CF_BLOCKS: &str = "blocks";
 
 const META_HEIGHT: &[u8] = b"height";
 const META_LAST_BLOCK_ID: &[u8] = b"last_block_id";
@@ -68,6 +70,8 @@ impl Storage {
             ColumnFamilyDescriptor::new(CF_GUARDIANS, Options::default()),
             ColumnFamilyDescriptor::new(CF_RECOVERY, Options::default()),
             ColumnFamilyDescriptor::new(CF_KEYS, Options::default()),
+            ColumnFamilyDescriptor::new(CF_BLOB_REPLICAS, Options::default()),
+            ColumnFamilyDescriptor::new(CF_BLOCKS, Options::default()),
         ];
 
         let db = DB::open_cf_descriptors(&opts, path, cf_descriptors)?;
@@ -358,6 +362,63 @@ impl Storage {
         Ok(map)
     }
 
+    // ── Blob replicas operations (CF: blob_replicas) ──
+
+    pub fn load_all_blob_replicas(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<[u8; 32]>>> {
+        let cf = self.cf(CF_BLOB_REPLICAS)?;
+        let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+        let mut map = std::collections::BTreeMap::new();
+        for item in iter {
+            let (key, value) = item?;
+            let blob_key = String::from_utf8(key.to_vec())
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let replicas: std::collections::BTreeSet<[u8; 32]> = serde_json::from_slice(&value)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            map.insert(blob_key, replicas);
+        }
+        Ok(map)
+    }
+
+    // ── Block history operations (CF: blocks) ──
+
+    pub fn save_block(&self, height: Height, block: &crate::types::Block) -> Result<()> {
+        let cf = self.cf(CF_BLOCKS)?;
+        let key = height.0.to_be_bytes();
+        let value =
+            serde_json::to_vec(block).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.db.put_cf(&cf, key, value)?;
+        Ok(())
+    }
+
+    pub fn load_block(&self, height: Height) -> Result<Option<crate::types::Block>> {
+        let cf = self.cf(CF_BLOCKS)?;
+        let key = height.0.to_be_bytes();
+        match self.db.get_cf(&cf, key)? {
+            Some(bytes) => {
+                let block = serde_json::from_slice(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(Some(block))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn load_blocks(&self, from: Height, to: Height) -> Result<Vec<crate::types::Block>> {
+        let cf = self.cf(CF_BLOCKS)?;
+        let mut blocks = Vec::new();
+        for h in from.0..=to.0 {
+            let key = h.to_be_bytes();
+            if let Some(bytes) = self.db.get_cf(&cf, key)? {
+                let block: crate::types::Block = serde_json::from_slice(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                blocks.push(block);
+            }
+        }
+        Ok(blocks)
+    }
+
     // ── Bulk save (after apply_block) ──
 
     /// Save the full chain state to RocksDB atomically using WriteBatch.
@@ -410,6 +471,14 @@ impl Storage {
             batch.put_cf(&cf_keys, key.as_bytes(), value);
         }
 
+        // Blob replicas
+        let cf_blob_replicas = self.cf(CF_BLOB_REPLICAS)?;
+        for (blob_key, replicas) in &state.blob_replicas {
+            let value = serde_json::to_vec(replicas)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            batch.put_cf(&cf_blob_replicas, blob_key.as_bytes(), value);
+        }
+
         // Atomic write
         self.db.write(batch)?;
 
@@ -433,6 +502,7 @@ impl Storage {
         let guardian_registry = self.load_all_guardians()?;
         let recovery_requests = self.load_all_recovery_requests()?;
         let key_registry = self.load_all_keys()?;
+        let blob_replicas = self.load_all_blob_replicas()?;
 
         Ok(Some(crate::state::ChainState {
             height,
@@ -442,6 +512,7 @@ impl Storage {
             guardian_registry,
             recovery_requests,
             key_registry,
+            blob_replicas,
         }))
     }
 }

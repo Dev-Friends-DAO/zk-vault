@@ -9,6 +9,7 @@
 //! - JSON-RPC server ([`rpc`])
 
 pub mod blob_store;
+pub mod blob_sync;
 pub mod consensus;
 pub mod mempool;
 pub mod node;

@@ -225,6 +225,18 @@ pub enum Transaction {
         /// Signature with current Ed25519 key over BLAKE3(new_ed25519_pk).
         signature: Vec<u8>,
     },
+
+    /// Validator attests that it stores a blob.
+    UpdateStorageStatus {
+        /// Blob key.
+        blob_key: String,
+        /// Validator's Ed25519 public key.
+        validator_pk: [u8; 32],
+        /// Whether the validator holds the blob.
+        holds_blob: bool,
+        /// Ed25519 signature over BLAKE3("zk-vault:storage-status:" || blob_key || holds_blob_byte).
+        signature: Vec<u8>,
+    },
 }
 
 impl Transaction {

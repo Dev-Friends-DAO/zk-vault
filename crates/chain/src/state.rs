@@ -147,6 +147,9 @@ pub struct ChainState {
     pub recovery_requests: BTreeMap<[u8; 32], RecoveryRequest>,
     /// Key registry: owner_pk → KeyEntry (for revocation tracking).
     pub key_registry: BTreeMap<[u8; 32], KeyEntry>,
+    /// Blob replica tracking: blob_key -> set of validator PKs that hold the blob.
+    #[serde(default)]
+    pub blob_replicas: BTreeMap<String, BTreeSet<[u8; 32]>>,
 }
 
 impl ChainState {
@@ -161,6 +164,7 @@ impl ChainState {
             guardian_registry: BTreeMap::new(),
             recovery_requests: BTreeMap::new(),
             key_registry: BTreeMap::new(),
+            blob_replicas: BTreeMap::new(),
         }
     }
 
@@ -184,6 +188,12 @@ impl ChainState {
             let ke_bytes =
                 serde_json::to_vec(key_entry).expect("KeyEntry serialization cannot fail");
             hasher.update(&ke_bytes);
+        }
+        for (blob_key, replicas) in &self.blob_replicas {
+            hasher.update(blob_key.as_bytes());
+            for pk in replicas {
+                hasher.update(pk);
+            }
         }
         *hasher.finalize().as_bytes()
     }
@@ -491,6 +501,39 @@ impl ChainState {
                 key_entry.revoked_pks.push(key_entry.current_pk);
                 key_entry.current_pk = *new_ed25519_pk;
                 key_entry.last_rotated = height;
+            }
+
+            Transaction::UpdateStorageStatus {
+                blob_key,
+                validator_pk,
+                holds_blob,
+                signature,
+            } => {
+                // Verify validator is in the current set
+                let addr = Address::from_public_key(validator_pk);
+                if self.validator_set.get_by_address(&addr).is_none() {
+                    return Err(StateError::Unauthorized);
+                }
+
+                // Verify signature over domain-separated message
+                let mut msg = Vec::new();
+                msg.extend_from_slice(b"zk-vault:storage-status:");
+                msg.extend_from_slice(blob_key.as_bytes());
+                msg.push(if *holds_blob { 1 } else { 0 });
+                let msg_hash = blake3::hash(&msg);
+                verify_ed25519(validator_pk, msg_hash.as_bytes(), signature)?;
+
+                if *holds_blob {
+                    self.blob_replicas
+                        .entry(blob_key.clone())
+                        .or_default()
+                        .insert(*validator_pk);
+                } else if let Some(set) = self.blob_replicas.get_mut(blob_key.as_str()) {
+                    set.remove(validator_pk);
+                    if set.is_empty() {
+                        self.blob_replicas.remove(blob_key.as_str());
+                    }
+                }
             }
         }
 

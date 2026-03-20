@@ -51,6 +51,8 @@ pub struct NodeConfig {
     pub validator_pk: [u8; 32],
     /// Mempool configuration.
     pub mempool_config: MempoolConfig,
+    /// Number of replicas for blob replication.
+    pub replication_factor: u32,
 }
 
 // ── Node ──
@@ -213,6 +215,11 @@ impl Node {
             .save_chain_state(&self.state)
             .map_err(|e| NodeError::Storage(e.to_string()))?;
 
+        // Save block to history
+        self.storage
+            .save_block(height, &block)
+            .map_err(|e| NodeError::Storage(e.to_string()))?;
+
         info!(
             height = height.0,
             tx_count,
@@ -286,6 +293,20 @@ impl Node {
             .map_err(|e| NodeError::BlobStore(e.to_string()))
     }
 
+    /// Get a block by height from the persistent history.
+    pub fn get_block(&self, height: Height) -> Result<Option<Block>> {
+        self.storage
+            .load_block(height)
+            .map_err(|e| NodeError::Storage(e.to_string()))
+    }
+
+    /// Get a range of blocks from the persistent history.
+    pub fn get_blocks(&self, from: Height, to: Height) -> Result<Vec<Block>> {
+        self.storage
+            .load_blocks(from, to)
+            .map_err(|e| NodeError::Storage(e.to_string()))
+    }
+
     /// Get the current validator set.
     pub fn validator_set(&self) -> &ValidatorSet {
         &self.state.validator_set
@@ -354,6 +375,7 @@ mod tests {
             validator_address: Address::from_public_key(&keys[0].1),
             validator_pk: keys[0].1,
             mempool_config: MempoolConfig::default(),
+            replication_factor: 3,
         };
 
         let (storage, dir) = test_storage();
@@ -561,6 +583,7 @@ mod tests {
             validator_address: Address::from_public_key(pk),
             validator_pk: *pk,
             mempool_config: MempoolConfig::default(),
+            replication_factor: 3,
         };
         let restored = Node::from_state(saved_state, config, storage);
 
