@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
+use crate::anchor_service::AnchorService;
 use crate::blob_sync::BlobSyncManager;
 use crate::consensus::engine::ValidatorSelector;
 use crate::consensus::vote_collector::VoteCollector;
@@ -100,6 +101,9 @@ pub struct ConsensusDriver {
 
     /// Optional blob sync manager for handling replication events.
     blob_sync: Option<Arc<RwLock<BlobSyncManager>>>,
+
+    /// Anchor service for epoch-based BTC/ETH anchoring.
+    anchor_service: Option<Arc<RwLock<AnchorService>>>,
 }
 
 impl ConsensusDriver {
@@ -144,12 +148,18 @@ impl ConsensusDriver {
             peer_manager,
             config,
             blob_sync: None,
+            anchor_service: None,
         }
     }
 
     /// Set the blob sync manager for handling replication events.
     pub fn set_blob_sync(&mut self, sync: Arc<RwLock<BlobSyncManager>>) {
         self.blob_sync = Some(sync);
+    }
+
+    /// Set the anchor service for epoch-based anchoring.
+    pub fn set_anchor_service(&mut self, service: Arc<RwLock<AnchorService>>) {
+        self.anchor_service = Some(service);
     }
 
     /// Run the consensus event loop. This method never returns under
@@ -544,6 +554,20 @@ impl ConsensusDriver {
             height: self.height,
         };
         self.p2p.announce_block(announce).await;
+
+        // Check if this height triggers an epoch anchor
+        if let Some(anchor_svc) = &self.anchor_service {
+            let svc = anchor_svc.read().await;
+            if svc.is_anchor_validator(self.height) {
+                let height = self.height;
+                let anchor_svc = Arc::clone(anchor_svc);
+                // Spawn anchor execution in background (don't block consensus)
+                tokio::spawn(async move {
+                    let svc = anchor_svc.read().await;
+                    svc.execute_anchor(height).await;
+                });
+            }
+        }
 
         // GC old votes and advance height
         self.prevotes.gc(self.height);

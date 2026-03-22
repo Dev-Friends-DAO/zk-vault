@@ -298,6 +298,14 @@ fn pre_validate(tx: &Transaction, state: &ChainState) -> Result<()> {
             let msg_hash = blake3::hash(&msg);
             verify_ed25519_quick(validator_pk, msg_hash.as_bytes(), signature)?;
         }
+
+        Transaction::AnchorMerkleRoot { signature, .. } => {
+            if signature.len() != 64 {
+                return Err(MempoolError::Invalid(
+                    "AnchorMerkleRoot signature must be 64 bytes".into(),
+                ));
+            }
+        }
     }
     Ok(())
 }

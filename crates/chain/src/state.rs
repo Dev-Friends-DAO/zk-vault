@@ -128,6 +128,25 @@ pub struct KeyEntry {
     pub last_rotated: Height,
 }
 
+/// A recorded anchor event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnchorEntry {
+    /// The Super Merkle Root that was anchored.
+    pub super_root: [u8; 32],
+    /// Epoch number.
+    pub epoch: u64,
+    /// Bitcoin transaction ID (if successful).
+    pub btc_tx_id: Option<String>,
+    /// Ethereum transaction ID (if successful).
+    pub eth_tx_id: Option<String>,
+    /// Number of files included.
+    pub file_count: u32,
+    /// Validator who performed the anchor.
+    pub anchor_validator_pk: [u8; 32],
+    /// Block height at which the anchor was recorded.
+    pub recorded_at: Height,
+}
+
 // ── Chain State ──
 
 /// The full chain state.
@@ -150,6 +169,9 @@ pub struct ChainState {
     /// Blob replica tracking: blob_key -> set of validator PKs that hold the blob.
     #[serde(default)]
     pub blob_replicas: BTreeMap<String, BTreeSet<[u8; 32]>>,
+    /// Anchor history: epoch -> AnchorEntry.
+    #[serde(default)]
+    pub anchor_history: BTreeMap<u64, AnchorEntry>,
 }
 
 impl ChainState {
@@ -165,6 +187,7 @@ impl ChainState {
             recovery_requests: BTreeMap::new(),
             key_registry: BTreeMap::new(),
             blob_replicas: BTreeMap::new(),
+            anchor_history: BTreeMap::new(),
         }
     }
 
@@ -194,6 +217,12 @@ impl ChainState {
             for pk in replicas {
                 hasher.update(pk);
             }
+        }
+        for (epoch, entry) in &self.anchor_history {
+            hasher.update(&epoch.to_le_bytes());
+            let entry_bytes =
+                serde_json::to_vec(entry).expect("AnchorEntry serialization cannot fail");
+            hasher.update(&entry_bytes);
         }
         *hasher.finalize().as_bytes()
     }
@@ -534,6 +563,44 @@ impl ChainState {
                         self.blob_replicas.remove(blob_key.as_str());
                     }
                 }
+            }
+
+            Transaction::AnchorMerkleRoot {
+                super_root,
+                epoch,
+                btc_tx_id,
+                eth_tx_id,
+                file_count,
+                anchor_validator_pk,
+                signature,
+            } => {
+                // Verify the anchor validator is in the current set
+                let addr = Address::from_public_key(anchor_validator_pk);
+                if self.validator_set.get_by_address(&addr).is_none() {
+                    return Err(StateError::Unauthorized);
+                }
+
+                // Verify signature over domain-separated message
+                let mut msg = Vec::new();
+                msg.extend_from_slice(b"zk-vault:anchor:");
+                msg.extend_from_slice(super_root);
+                msg.extend_from_slice(&epoch.to_le_bytes());
+                let msg_hash = blake3::hash(&msg);
+                verify_ed25519(anchor_validator_pk, msg_hash.as_bytes(), signature)?;
+
+                // Store anchor entry
+                self.anchor_history.insert(
+                    *epoch,
+                    AnchorEntry {
+                        super_root: *super_root,
+                        epoch: *epoch,
+                        btc_tx_id: btc_tx_id.clone(),
+                        eth_tx_id: eth_tx_id.clone(),
+                        file_count: *file_count,
+                        anchor_validator_pk: *anchor_validator_pk,
+                        recorded_at: height,
+                    },
+                );
             }
         }
 

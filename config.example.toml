@@ -24,13 +24,22 @@ api_url = "https://up.storacha.network"
 auth_token = ""
 gateway_url = "https://w3s.link"
 
+[anchor]
+# Epoch length in blocks (0 = disabled). Anchor triggers every N blocks.
+# epoch_length = 100
+# enabled = true
+# Anchor keystore path (default: ~/.zk-vault/anchor_keystore.json)
+# keystore_path = "~/.zk-vault/anchor_keystore.json"
+
 [anchor.bitcoin]
 api_url = "https://mempool.space/testnet/api"
 network = "testnet"
-wif_private_key = ""
+# Private key is stored in encrypted anchor_keystore.json
+# Run: zk-vault anchor init --btc
+# wif_private_key = ""  # DEPRECATED: use anchor keystore
 
 [anchor.ethereum]
 rpc_url = "https://sepolia.infura.io/v3/YOUR_KEY"
 network = "sepolia"
-private_key_hex = ""
+# private_key_hex = ""  # DEPRECATED: use anchor keystore
 chain_id = 11155111

@@ -237,6 +237,24 @@ pub enum Transaction {
         /// Ed25519 signature over BLAKE3("zk-vault:storage-status:" || blob_key || holds_blob_byte).
         signature: Vec<u8>,
     },
+
+    /// Record a BTC/ETH anchor of the Super Merkle Root.
+    AnchorMerkleRoot {
+        /// The Super Merkle Root that was anchored.
+        super_root: [u8; 32],
+        /// Epoch number (height / epoch_length).
+        epoch: u64,
+        /// Bitcoin anchor receipt (None if BTC anchor was not attempted or failed).
+        btc_tx_id: Option<String>,
+        /// Ethereum anchor receipt (None if ETH anchor was not attempted or failed).
+        eth_tx_id: Option<String>,
+        /// Number of files included in the Super Merkle Tree.
+        file_count: u32,
+        /// Validator who performed the anchor.
+        anchor_validator_pk: [u8; 32],
+        /// Ed25519 signature over BLAKE3("zk-vault:anchor:" || super_root || epoch_bytes).
+        signature: Vec<u8>,
+    },
 }
 
 impl Transaction {

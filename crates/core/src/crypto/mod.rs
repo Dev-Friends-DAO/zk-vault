@@ -1,4 +1,5 @@
 pub mod aead;
+pub mod anchor_keystore;
 pub mod bundle;
 pub mod guardian;
 pub mod hash;

@@ -26,6 +26,7 @@ const CF_RECOVERY: &str = "recovery";
 const CF_KEYS: &str = "keys";
 const CF_BLOB_REPLICAS: &str = "blob_replicas";
 const CF_BLOCKS: &str = "blocks";
+const CF_ANCHORS: &str = "anchors";
 
 const META_HEIGHT: &[u8] = b"height";
 const META_LAST_BLOCK_ID: &[u8] = b"last_block_id";
@@ -72,6 +73,7 @@ impl Storage {
             ColumnFamilyDescriptor::new(CF_KEYS, Options::default()),
             ColumnFamilyDescriptor::new(CF_BLOB_REPLICAS, Options::default()),
             ColumnFamilyDescriptor::new(CF_BLOCKS, Options::default()),
+            ColumnFamilyDescriptor::new(CF_ANCHORS, Options::default()),
         ];
 
         let db = DB::open_cf_descriptors(&opts, path, cf_descriptors)?;
@@ -381,6 +383,28 @@ impl Storage {
         Ok(map)
     }
 
+    // ── Anchor history operations (CF: anchors) ──
+
+    pub fn load_all_anchors(
+        &self,
+    ) -> Result<std::collections::BTreeMap<u64, crate::state::AnchorEntry>> {
+        let cf = self.cf(CF_ANCHORS)?;
+        let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+        let mut map = std::collections::BTreeMap::new();
+        for item in iter {
+            let (key, value) = item?;
+            let epoch_bytes: [u8; 8] = key
+                .as_ref()
+                .try_into()
+                .map_err(|_| StorageError::Serialization("Invalid epoch key length".into()))?;
+            let epoch = u64::from_be_bytes(epoch_bytes);
+            let entry: crate::state::AnchorEntry = serde_json::from_slice(&value)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            map.insert(epoch, entry);
+        }
+        Ok(map)
+    }
+
     // ── Block history operations (CF: blocks) ──
 
     pub fn save_block(&self, height: Height, block: &crate::types::Block) -> Result<()> {
@@ -479,6 +503,15 @@ impl Storage {
             batch.put_cf(&cf_blob_replicas, blob_key.as_bytes(), value);
         }
 
+        // Anchor history
+        let cf_anchors = self.cf(CF_ANCHORS)?;
+        for (epoch, entry) in &state.anchor_history {
+            let key = epoch.to_be_bytes();
+            let value = serde_json::to_vec(entry)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            batch.put_cf(&cf_anchors, key, value);
+        }
+
         // Atomic write
         self.db.write(batch)?;
 
@@ -503,6 +536,7 @@ impl Storage {
         let recovery_requests = self.load_all_recovery_requests()?;
         let key_registry = self.load_all_keys()?;
         let blob_replicas = self.load_all_blob_replicas()?;
+        let anchor_history = self.load_all_anchors()?;
 
         Ok(Some(crate::state::ChainState {
             height,
@@ -513,6 +547,7 @@ impl Storage {
             recovery_requests,
             key_registry,
             blob_replicas,
+            anchor_history,
         }))
     }
 }

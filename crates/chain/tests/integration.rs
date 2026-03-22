@@ -1108,3 +1108,206 @@ async fn block_history_store_roundtrip() {
     let missing = n.get_block(zk_vault_chain::types::Height(99)).unwrap();
     assert!(missing.is_none());
 }
+
+/// K1/K5: AnchorMerkleRoot transaction round-trip.
+///
+/// Tests that AnchorMerkleRoot transactions are properly processed
+/// and anchor history is updated in ChainState.
+#[tokio::test]
+async fn anchor_merkle_root_tx_roundtrip() {
+    let net = TestNetwork::spawn(3).await;
+    let (sk, pk) = &net.keys[0];
+
+    // First register some files to have a non-empty registry
+    for i in 0..3u8 {
+        let mut root = [0u8; 32];
+        root[0] = i + 200;
+        let tx = make_register_tx(sk, pk, root);
+        net.nodes[0].lock().unwrap().submit_tx(tx).unwrap();
+    }
+    net.propose_and_broadcast();
+
+    // Compute Super Merkle Root (same logic as anchor_status RPC)
+    let super_root = {
+        let n = net.nodes[0].lock().unwrap();
+        let state = n.state();
+        let leaf_hashes: Vec<[u8; 32]> = state.file_registry.keys().copied().collect();
+        let tree = zk_vault_core::merkle::tree::MerkleTree::from_leaf_hashes(leaf_hashes);
+        tree.root().unwrap()
+    };
+
+    // Submit AnchorMerkleRoot tx
+    let epoch = 1u64;
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"zk-vault:anchor:");
+    msg.extend_from_slice(&super_root);
+    msg.extend_from_slice(&epoch.to_le_bytes());
+    let msg_hash = blake3::hash(&msg);
+    let sig = sk.sign(msg_hash.as_bytes());
+
+    let tx = Transaction::AnchorMerkleRoot {
+        super_root,
+        epoch,
+        btc_tx_id: Some("btc_test_txid_abc123".to_string()),
+        eth_tx_id: Some("0xeth_test_txid_def456".to_string()),
+        file_count: 3,
+        anchor_validator_pk: *pk,
+        signature: sig.to_bytes().to_vec(),
+    };
+
+    net.nodes[0].lock().unwrap().submit_tx(tx).unwrap();
+    net.propose_and_broadcast();
+
+    // Verify anchor history on all nodes
+    for node in &net.nodes {
+        let n = node.lock().unwrap();
+        let state = n.state();
+        let entry = state.anchor_history.get(&1u64);
+        assert!(entry.is_some(), "Anchor entry should exist for epoch 1");
+
+        let entry = entry.unwrap();
+        assert_eq!(entry.super_root, super_root);
+        assert_eq!(entry.epoch, 1);
+        assert_eq!(entry.btc_tx_id.as_deref(), Some("btc_test_txid_abc123"));
+        assert_eq!(entry.eth_tx_id.as_deref(), Some("0xeth_test_txid_def456"));
+        assert_eq!(entry.file_count, 3);
+        assert_eq!(entry.anchor_validator_pk, *pk);
+    }
+
+    // State roots match
+    let roots: Vec<_> = net
+        .nodes
+        .iter()
+        .map(|n| n.lock().unwrap().state_root())
+        .collect();
+    assert_eq!(roots[0], roots[1]);
+    assert_eq!(roots[1], roots[2]);
+}
+
+/// K: Anchor service epoch boundary detection and round-robin.
+#[tokio::test]
+async fn anchor_service_epoch_scheduling() {
+    use zk_vault_chain::anchor_service::{AnchorConfig, AnchorService};
+
+    let keys: Vec<_> = (1..=3u8).map(make_keypair).collect();
+    let validators: Vec<Validator> = keys
+        .iter()
+        .map(|(_, pk)| Validator::new(*pk, 100))
+        .collect();
+    let vs = ValidatorSet::new(validators);
+
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(Storage::open(dir.path()).unwrap());
+    let config = zk_vault_chain::node::NodeConfig {
+        validator_address: Address::from_public_key(&keys[0].1),
+        validator_pk: keys[0].1,
+        mempool_config: zk_vault_chain::mempool::MempoolConfig::default(),
+        replication_factor: 3,
+    };
+    let node = Arc::new(tokio::sync::RwLock::new(zk_vault_chain::node::Node::new(
+        vs, config, storage,
+    )));
+
+    let anchor_config = AnchorConfig {
+        epoch_length: 5,
+        btc_config: None,
+        eth_config: Some(zk_vault_core::anchor::ethereum::EthereumConfig {
+            rpc_url: "http://localhost:1".to_string(),
+            network: "test".to_string(),
+            private_key_hex: "01".repeat(32),
+            chain_id: 1,
+        }),
+    };
+
+    let svc0 = AnchorService::new(Arc::clone(&node), keys[0].0.clone(), anchor_config.clone());
+    let svc1 = AnchorService::new(Arc::clone(&node), keys[1].0.clone(), anchor_config.clone());
+    let svc2 = AnchorService::new(Arc::clone(&node), keys[2].0.clone(), anchor_config);
+
+    // Epoch 1 (height 5): 1 % 3 = 1 → validator 1
+    assert!(!svc0.is_anchor_validator(zk_vault_chain::types::Height(5)));
+    assert!(svc1.is_anchor_validator(zk_vault_chain::types::Height(5)));
+    assert!(!svc2.is_anchor_validator(zk_vault_chain::types::Height(5)));
+
+    // Epoch 2 (height 10): 2 % 3 = 2 → validator 2
+    assert!(!svc0.is_anchor_validator(zk_vault_chain::types::Height(10)));
+    assert!(!svc1.is_anchor_validator(zk_vault_chain::types::Height(10)));
+    assert!(svc2.is_anchor_validator(zk_vault_chain::types::Height(10)));
+
+    // Epoch 3 (height 15): 3 % 3 = 0 → validator 0
+    assert!(svc0.is_anchor_validator(zk_vault_chain::types::Height(15)));
+
+    // Non-epoch heights should never be anchor validators
+    assert!(!svc0.is_anchor_validator(zk_vault_chain::types::Height(7)));
+    assert!(!svc1.is_anchor_validator(zk_vault_chain::types::Height(3)));
+}
+
+/// K: Anchor list RPC endpoint.
+#[tokio::test]
+async fn anchor_list_rpc() {
+    let net = TestNetwork::spawn(3).await;
+    let client = reqwest::Client::new();
+    let (sk, pk) = &net.keys[0];
+    let base = &net.urls[0];
+
+    // Register a file and propose
+    let tx = make_register_tx(sk, pk, [0xAA; 32]);
+    net.nodes[0].lock().unwrap().submit_tx(tx).unwrap();
+    net.propose_and_broadcast();
+
+    // Submit an anchor tx
+    let super_root = {
+        let n = net.nodes[0].lock().unwrap();
+        let state = n.state();
+        let leaf_hashes: Vec<[u8; 32]> = state.file_registry.keys().copied().collect();
+        let tree = zk_vault_core::merkle::tree::MerkleTree::from_leaf_hashes(leaf_hashes);
+        tree.root().unwrap()
+    };
+
+    let epoch = 1u64;
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"zk-vault:anchor:");
+    msg.extend_from_slice(&super_root);
+    msg.extend_from_slice(&epoch.to_le_bytes());
+    let msg_hash = blake3::hash(&msg);
+    let sig = sk.sign(msg_hash.as_bytes());
+
+    let anchor_tx = Transaction::AnchorMerkleRoot {
+        super_root,
+        epoch,
+        btc_tx_id: Some("test_btc_tx".to_string()),
+        eth_tx_id: None,
+        file_count: 1,
+        anchor_validator_pk: *pk,
+        signature: sig.to_bytes().to_vec(),
+    };
+    net.nodes[0].lock().unwrap().submit_tx(anchor_tx).unwrap();
+    net.propose_and_broadcast();
+
+    // Query list_anchors
+    let resp: rpc::ListAnchorsResponse = client
+        .get(format!("{base}/list_anchors"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp.total, 1);
+    assert_eq!(resp.anchors[0].epoch, 1);
+    assert_eq!(resp.anchors[0].btc_tx_id.as_deref(), Some("test_btc_tx"));
+    assert!(resp.anchors[0].eth_tx_id.is_none());
+    assert_eq!(resp.anchors[0].file_count, 1);
+
+    // Query get_anchor for specific epoch
+    let resp: rpc::GetAnchorResponse = client
+        .post(format!("{base}/get_anchor"))
+        .json(&rpc::GetAnchorRequest { epoch: Some(1) })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp.epoch, 1);
+    assert_eq!(resp.super_root, hex::encode(super_root));
+}

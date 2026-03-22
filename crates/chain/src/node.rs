@@ -263,6 +263,16 @@ impl Node {
         self.state.key_registry.get(owner_pk)
     }
 
+    /// Get anchor entry by epoch.
+    pub fn get_anchor(&self, epoch: u64) -> Option<&crate::state::AnchorEntry> {
+        self.state.anchor_history.get(&epoch)
+    }
+
+    /// Get the latest anchor entry.
+    pub fn latest_anchor(&self) -> Option<&crate::state::AnchorEntry> {
+        self.state.anchor_history.values().last()
+    }
+
     // ── Blob store operations (Mode B) ──
 
     /// Store an encrypted data blob. Returns the size in bytes.

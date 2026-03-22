@@ -8,6 +8,7 @@
 //! - Node actor / consensus driver ([`node`])
 //! - JSON-RPC server ([`rpc`])
 
+pub mod anchor_service;
 pub mod blob_store;
 pub mod blob_sync;
 pub mod consensus;

@@ -178,6 +178,32 @@ pub struct GetKeyStatusResponse {
     pub last_rotated: u64,
 }
 
+/// Get anchor history request.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetAnchorRequest {
+    /// Epoch number to query (if omitted, returns latest).
+    pub epoch: Option<u64>,
+}
+
+/// Get anchor history response.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetAnchorResponse {
+    pub epoch: u64,
+    pub super_root: String,
+    pub btc_tx_id: Option<String>,
+    pub eth_tx_id: Option<String>,
+    pub file_count: u32,
+    pub anchor_validator: String,
+    pub recorded_at: u64,
+}
+
+/// List all anchors response.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListAnchorsResponse {
+    pub anchors: Vec<GetAnchorResponse>,
+    pub total: usize,
+}
+
 /// Generic error response.
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
@@ -208,6 +234,8 @@ pub fn router(node: SharedNode) -> Router {
         .route("/get_guardians", post(handle_get_guardians))
         .route("/get_recovery_status", post(handle_get_recovery_status))
         .route("/get_key_status", post(handle_get_key_status))
+        .route("/get_anchor", post(handle_get_anchor))
+        .route("/list_anchors", get(handle_list_anchors))
         .with_state(node)
 }
 
@@ -235,6 +263,8 @@ pub fn router_with_sync(state: RpcState) -> Router {
         .route("/get_guardians", post(handle_get_guardians_v2))
         .route("/get_recovery_status", post(handle_get_recovery_status_v2))
         .route("/get_key_status", post(handle_get_key_status_v2))
+        .route("/get_anchor", post(handle_get_anchor_v2))
+        .route("/list_anchors", get(handle_list_anchors_v2))
         .with_state(state)
 }
 
@@ -478,6 +508,62 @@ async fn handle_anchor_status(State(node): State<SharedNode>) -> Json<AnchorStat
         super_root: super_root.map(hex::encode),
         user_proofs,
     })
+}
+
+async fn handle_get_anchor(
+    State(node): State<SharedNode>,
+    Json(req): Json<GetAnchorRequest>,
+) -> Result<Json<GetAnchorResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let node = node.lock().unwrap();
+    let state = node.state();
+
+    let entry = if let Some(epoch) = req.epoch {
+        state.anchor_history.get(&epoch)
+    } else {
+        // Return latest anchor
+        state.anchor_history.values().last()
+    };
+
+    let entry = entry.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "No anchor found".to_string(),
+            }),
+        )
+    })?;
+
+    Ok(Json(GetAnchorResponse {
+        epoch: entry.epoch,
+        super_root: hex::encode(entry.super_root),
+        btc_tx_id: entry.btc_tx_id.clone(),
+        eth_tx_id: entry.eth_tx_id.clone(),
+        file_count: entry.file_count,
+        anchor_validator: hex::encode(entry.anchor_validator_pk),
+        recorded_at: entry.recorded_at.0,
+    }))
+}
+
+async fn handle_list_anchors(State(node): State<SharedNode>) -> Json<ListAnchorsResponse> {
+    let node = node.lock().unwrap();
+    let state = node.state();
+
+    let anchors: Vec<GetAnchorResponse> = state
+        .anchor_history
+        .values()
+        .map(|entry| GetAnchorResponse {
+            epoch: entry.epoch,
+            super_root: hex::encode(entry.super_root),
+            btc_tx_id: entry.btc_tx_id.clone(),
+            eth_tx_id: entry.eth_tx_id.clone(),
+            file_count: entry.file_count,
+            anchor_validator: hex::encode(entry.anchor_validator_pk),
+            recorded_at: entry.recorded_at.0,
+        })
+        .collect();
+
+    let total = anchors.len();
+    Json(ListAnchorsResponse { anchors, total })
 }
 
 /// Parse a hex-encoded 32-byte public key from a request string.
@@ -763,6 +849,17 @@ async fn handle_get_key_status_v2(
     body: Json<GetKeyStatusRequest>,
 ) -> Result<Json<GetKeyStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
     handle_get_key_status(State(state.node), body).await
+}
+
+async fn handle_get_anchor_v2(
+    State(state): State<RpcState>,
+    body: Json<GetAnchorRequest>,
+) -> Result<Json<GetAnchorResponse>, (StatusCode, Json<ErrorResponse>)> {
+    handle_get_anchor(State(state.node), body).await
+}
+
+async fn handle_list_anchors_v2(State(state): State<RpcState>) -> Json<ListAnchorsResponse> {
+    handle_list_anchors(State(state.node)).await
 }
 
 #[cfg(test)]
