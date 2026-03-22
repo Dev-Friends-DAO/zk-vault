@@ -224,11 +224,13 @@ mod tests {
         (sk, pk)
     }
 
-    fn test_setup() -> (
+    type TestSetup = (
         Arc<RwLock<Node>>,
         Vec<(SigningKey, [u8; 32])>,
         tempfile::TempDir,
-    ) {
+    );
+
+    fn test_setup() -> TestSetup {
         let keys: Vec<_> = (1..=3).map(make_keypair).collect();
         let validators: Vec<Validator> = keys
             .iter()
