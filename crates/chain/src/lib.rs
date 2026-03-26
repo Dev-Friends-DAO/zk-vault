@@ -12,6 +12,7 @@ pub mod anchor_service;
 pub mod blob_store;
 pub mod blob_sync;
 pub mod consensus;
+pub mod deal_monitor;
 pub mod mempool;
 pub mod node;
 pub mod p2p;

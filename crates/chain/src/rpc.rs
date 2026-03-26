@@ -204,6 +204,40 @@ pub struct ListAnchorsResponse {
     pub total: usize,
 }
 
+/// Get deals request.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetDealsRequest {
+    /// CID to query deals for.
+    pub data_cid: String,
+}
+
+/// Deal info in RPC response.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DealInfoResponse {
+    pub data_cid: String,
+    pub deal_id: u64,
+    pub provider: String,
+    pub end_epoch: u64,
+    pub is_renewal: bool,
+    pub merkle_root: String,
+    pub validator: String,
+    pub recorded_at: u64,
+}
+
+/// Get deals response.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetDealsResponse {
+    pub data_cid: String,
+    pub deals: Vec<DealInfoResponse>,
+}
+
+/// List all deals response.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListDealsResponse {
+    pub deals: Vec<DealInfoResponse>,
+    pub total: usize,
+}
+
 /// Generic error response.
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
@@ -236,6 +270,8 @@ pub fn router(node: SharedNode) -> Router {
         .route("/get_key_status", post(handle_get_key_status))
         .route("/get_anchor", post(handle_get_anchor))
         .route("/list_anchors", get(handle_list_anchors))
+        .route("/get_deals", post(handle_get_deals))
+        .route("/list_deals", get(handle_list_deals))
         .with_state(node)
 }
 
@@ -265,6 +301,8 @@ pub fn router_with_sync(state: RpcState) -> Router {
         .route("/get_key_status", post(handle_get_key_status_v2))
         .route("/get_anchor", post(handle_get_anchor_v2))
         .route("/list_anchors", get(handle_list_anchors_v2))
+        .route("/get_deals", post(handle_get_deals_v2))
+        .route("/list_deals", get(handle_list_deals_v2))
         .with_state(state)
 }
 
@@ -566,6 +604,56 @@ async fn handle_list_anchors(State(node): State<SharedNode>) -> Json<ListAnchors
     Json(ListAnchorsResponse { anchors, total })
 }
 
+async fn handle_get_deals(
+    State(node): State<SharedNode>,
+    Json(req): Json<GetDealsRequest>,
+) -> Result<Json<GetDealsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let node = node.lock().unwrap();
+    let deals = node.get_deals(&req.data_cid).cloned().unwrap_or_default();
+
+    let deal_infos: Vec<DealInfoResponse> = deals
+        .iter()
+        .map(|d| DealInfoResponse {
+            data_cid: d.data_cid.clone(),
+            deal_id: d.deal_id,
+            provider: d.provider.clone(),
+            end_epoch: d.end_epoch,
+            is_renewal: d.is_renewal,
+            merkle_root: hex::encode(d.merkle_root),
+            validator: hex::encode(d.validator_pk),
+            recorded_at: d.recorded_at.0,
+        })
+        .collect();
+
+    Ok(Json(GetDealsResponse {
+        data_cid: req.data_cid,
+        deals: deal_infos,
+    }))
+}
+
+async fn handle_list_deals(State(node): State<SharedNode>) -> Json<ListDealsResponse> {
+    let node = node.lock().unwrap();
+    let all = node.all_deals();
+
+    let deals: Vec<DealInfoResponse> = all
+        .values()
+        .flatten()
+        .map(|d| DealInfoResponse {
+            data_cid: d.data_cid.clone(),
+            deal_id: d.deal_id,
+            provider: d.provider.clone(),
+            end_epoch: d.end_epoch,
+            is_renewal: d.is_renewal,
+            merkle_root: hex::encode(d.merkle_root),
+            validator: hex::encode(d.validator_pk),
+            recorded_at: d.recorded_at.0,
+        })
+        .collect();
+
+    let total = deals.len();
+    Json(ListDealsResponse { deals, total })
+}
+
 /// Parse a hex-encoded 32-byte public key from a request string.
 fn parse_pk(hex_str: &str) -> Result<[u8; 32], (StatusCode, Json<ErrorResponse>)> {
     let bytes = hex::decode(hex_str).map_err(|e| {
@@ -860,6 +948,17 @@ async fn handle_get_anchor_v2(
 
 async fn handle_list_anchors_v2(State(state): State<RpcState>) -> Json<ListAnchorsResponse> {
     handle_list_anchors(State(state.node)).await
+}
+
+async fn handle_get_deals_v2(
+    State(state): State<RpcState>,
+    body: Json<GetDealsRequest>,
+) -> Result<Json<GetDealsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    handle_get_deals(State(state.node), body).await
+}
+
+async fn handle_list_deals_v2(State(state): State<RpcState>) -> Json<ListDealsResponse> {
+    handle_list_deals(State(state.node)).await
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@
 //! from external clients (submit_tx, query), coordinating state transitions
 //! and mempool management.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tracing::info;
@@ -271,6 +272,16 @@ impl Node {
     /// Get the latest anchor entry.
     pub fn latest_anchor(&self) -> Option<&crate::state::AnchorEntry> {
         self.state.anchor_history.values().last()
+    }
+
+    /// Get deals for a CID.
+    pub fn get_deals(&self, data_cid: &str) -> Option<&Vec<crate::state::DealEntry>> {
+        self.state.deal_registry.get(data_cid)
+    }
+
+    /// Get all deals in the registry.
+    pub fn all_deals(&self) -> &BTreeMap<String, Vec<crate::state::DealEntry>> {
+        &self.state.deal_registry
     }
 
     // ── Blob store operations (Mode B) ──

@@ -20,9 +20,20 @@ secret_key = ""
 
 # Mode C: Filecoin storage (chain mode)
 [storage.filecoin]
-api_url = "https://up.storacha.network"
-auth_token = ""
-gateway_url = "https://w3s.link"
+# Lotus JSON-RPC endpoint (public or self-hosted)
+rpc_url = "https://api.node.glif.io/rpc/v1"
+# Auth token (required for self-hosted Lotus nodes with write access)
+# auth_token = "eyJ..."
+# IPFS gateway for data retrieval
+gateway_url = "https://dweb.link"
+# Minimum storage providers per file
+min_sps = 4
+# Maximum price per GiB per epoch (attoFIL)
+max_price_per_gib_epoch = "100000000"
+# Deal duration in days
+deal_duration_days = 540
+# Days before expiry to trigger renewal
+renew_before_days = 30
 
 [anchor]
 # Epoch length in blocks (0 = disabled). Anchor triggers every N blocks.

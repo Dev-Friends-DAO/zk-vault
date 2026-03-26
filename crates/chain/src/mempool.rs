@@ -306,6 +306,14 @@ fn pre_validate(tx: &Transaction, state: &ChainState) -> Result<()> {
                 ));
             }
         }
+
+        Transaction::RenewDeal { signature, .. } => {
+            if signature.len() != 64 {
+                return Err(MempoolError::Invalid(
+                    "RenewDeal signature must be 64 bytes".into(),
+                ));
+            }
+        }
     }
     Ok(())
 }

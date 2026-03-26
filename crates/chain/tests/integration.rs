@@ -1311,3 +1311,255 @@ async fn anchor_list_rpc() {
     assert_eq!(resp.epoch, 1);
     assert_eq!(resp.super_root, hex::encode(super_root));
 }
+
+/// L: RenewDeal transaction round-trip.
+///
+/// Tests that RenewDeal transactions are properly processed
+/// and the deal registry is updated in ChainState.
+#[tokio::test]
+async fn renew_deal_tx_roundtrip() {
+    let net = TestNetwork::spawn(3).await;
+    let (sk, pk) = &net.keys[0];
+
+    // First register a file
+    let merkle_root = [0xF1; 32];
+    let tx = make_register_tx(sk, pk, merkle_root);
+    net.nodes[0].lock().unwrap().submit_tx(tx).unwrap();
+    net.propose_and_broadcast();
+
+    // Submit a RenewDeal tx (initial deal, not renewal)
+    let data_cid = "bafytest123456";
+    let deal_id = 12345u64;
+
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"zk-vault:deal:");
+    msg.extend_from_slice(data_cid.as_bytes());
+    msg.extend_from_slice(&deal_id.to_le_bytes());
+    let msg_hash = blake3::hash(&msg);
+    let sig = sk.sign(msg_hash.as_bytes());
+
+    let tx = Transaction::RenewDeal {
+        data_cid: data_cid.to_string(),
+        deal_id,
+        provider: "f01234".to_string(),
+        end_epoch: 2880000, // ~540 days at 30s epochs
+        is_renewal: false,
+        merkle_root,
+        validator_pk: *pk,
+        signature: sig.to_bytes().to_vec(),
+    };
+
+    net.nodes[0].lock().unwrap().submit_tx(tx).unwrap();
+    net.propose_and_broadcast();
+
+    // Verify deal registry on all nodes
+    for node in &net.nodes {
+        let n = node.lock().unwrap();
+        let deals = n.get_deals("bafytest123456");
+        assert!(deals.is_some(), "Deal should exist");
+        let deals = deals.unwrap();
+        assert_eq!(deals.len(), 1);
+        assert_eq!(deals[0].deal_id, 12345);
+        assert_eq!(deals[0].provider, "f01234");
+        assert_eq!(deals[0].end_epoch, 2880000);
+        assert!(!deals[0].is_renewal);
+    }
+
+    // Submit a renewal for the same CID
+    let new_deal_id = 67890u64;
+    let mut msg2 = Vec::new();
+    msg2.extend_from_slice(b"zk-vault:deal:");
+    msg2.extend_from_slice(data_cid.as_bytes());
+    msg2.extend_from_slice(&new_deal_id.to_le_bytes());
+    let msg2_hash = blake3::hash(&msg2);
+    let sig2 = sk.sign(msg2_hash.as_bytes());
+
+    let renewal_tx = Transaction::RenewDeal {
+        data_cid: data_cid.to_string(),
+        deal_id: new_deal_id,
+        provider: "f05678".to_string(),
+        end_epoch: 5760000,
+        is_renewal: true,
+        merkle_root,
+        validator_pk: *pk,
+        signature: sig2.to_bytes().to_vec(),
+    };
+
+    net.nodes[0].lock().unwrap().submit_tx(renewal_tx).unwrap();
+    net.propose_and_broadcast();
+
+    // Now should have 2 deals for the same CID
+    for node in &net.nodes {
+        let n = node.lock().unwrap();
+        let deals = n.get_deals("bafytest123456").unwrap();
+        assert_eq!(deals.len(), 2);
+        assert!(!deals[0].is_renewal);
+        assert!(deals[1].is_renewal);
+        assert_eq!(deals[1].deal_id, 67890);
+    }
+
+    // State roots match
+    let roots: Vec<_> = net
+        .nodes
+        .iter()
+        .map(|n| n.lock().unwrap().state_root())
+        .collect();
+    assert_eq!(roots[0], roots[1]);
+    assert_eq!(roots[1], roots[2]);
+}
+
+/// L: Deal list RPC endpoint.
+#[tokio::test]
+async fn deal_list_rpc() {
+    let net = TestNetwork::spawn(3).await;
+    let client = reqwest::Client::new();
+    let (sk, pk) = &net.keys[0];
+    let base = &net.urls[0];
+
+    // Register a file
+    let merkle_root = [0xF2; 32];
+    let tx = make_register_tx(sk, pk, merkle_root);
+    net.nodes[0].lock().unwrap().submit_tx(tx).unwrap();
+    net.propose_and_broadcast();
+
+    // Create a deal
+    let data_cid = "bafytest_rpc_deal";
+    let deal_id = 99999u64;
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"zk-vault:deal:");
+    msg.extend_from_slice(data_cid.as_bytes());
+    msg.extend_from_slice(&deal_id.to_le_bytes());
+    let msg_hash = blake3::hash(&msg);
+    let sig = sk.sign(msg_hash.as_bytes());
+
+    let deal_tx = Transaction::RenewDeal {
+        data_cid: data_cid.to_string(),
+        deal_id,
+        provider: "f09999".to_string(),
+        end_epoch: 1000000,
+        is_renewal: false,
+        merkle_root,
+        validator_pk: *pk,
+        signature: sig.to_bytes().to_vec(),
+    };
+    net.nodes[0].lock().unwrap().submit_tx(deal_tx).unwrap();
+    net.propose_and_broadcast();
+
+    // Query list_deals
+    let resp: rpc::ListDealsResponse = client
+        .get(format!("{base}/list_deals"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp.total, 1);
+    assert_eq!(resp.deals[0].deal_id, 99999);
+    assert_eq!(resp.deals[0].provider, "f09999");
+
+    // Query get_deals for specific CID
+    let resp: rpc::GetDealsResponse = client
+        .post(format!("{base}/get_deals"))
+        .json(&rpc::GetDealsRequest {
+            data_cid: data_cid.to_string(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp.deals.len(), 1);
+    assert_eq!(resp.deals[0].data_cid, data_cid);
+}
+
+/// L: DealMonitor detects expiring deals.
+#[tokio::test]
+async fn deal_monitor_detects_expiry() {
+    use zk_vault_chain::deal_monitor::{DealMonitor, DealMonitorConfig};
+
+    let keys: Vec<_> = (1..=3u8).map(make_keypair).collect();
+    let validators: Vec<Validator> = keys
+        .iter()
+        .map(|(_, pk)| Validator::new(*pk, 100))
+        .collect();
+    let vs = ValidatorSet::new(validators);
+
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(Storage::open(dir.path()).unwrap());
+    let config = zk_vault_chain::node::NodeConfig {
+        validator_address: Address::from_public_key(&keys[0].1),
+        validator_pk: keys[0].1,
+        mempool_config: zk_vault_chain::mempool::MempoolConfig::default(),
+        replication_factor: 3,
+    };
+    let node = Arc::new(tokio::sync::RwLock::new(zk_vault_chain::node::Node::new(
+        vs, config, storage,
+    )));
+
+    // Register a file and commit
+    {
+        let (sk, pk) = &keys[0];
+        let merkle_root = [0xDD; 32];
+        let sig = sk.sign(&merkle_root);
+        let tx = Transaction::RegisterFile {
+            merkle_root,
+            file_count: 1,
+            encrypted_size: 100,
+            owner_pk: *pk,
+            signature: sig.to_bytes().to_vec(),
+        };
+        let mut n = node.write().await;
+        n.submit_tx(tx).unwrap();
+        let block = n.on_propose(0);
+        n.on_decided(block).unwrap();
+    }
+
+    // Add a deal that is about to expire (end_epoch = 1100, current = 1000)
+    {
+        let (sk, pk) = &keys[0];
+        let data_cid = "bafyexpiring";
+        let deal_id = 555u64;
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"zk-vault:deal:");
+        msg.extend_from_slice(data_cid.as_bytes());
+        msg.extend_from_slice(&deal_id.to_le_bytes());
+        let msg_hash = blake3::hash(&msg);
+        let sig = sk.sign(msg_hash.as_bytes());
+
+        let tx = Transaction::RenewDeal {
+            data_cid: data_cid.to_string(),
+            deal_id,
+            provider: "f0555".to_string(),
+            end_epoch: 1100,
+            is_renewal: false,
+            merkle_root: [0xDD; 32],
+            validator_pk: *pk,
+            signature: sig.to_bytes().to_vec(),
+        };
+        let mut n = node.write().await;
+        n.submit_tx(tx).unwrap();
+        let block = n.on_propose(0);
+        n.on_decided(block).unwrap();
+    }
+
+    // Create DealMonitor with renew_before_epochs = 200
+    let monitor = DealMonitor::new(
+        node.clone(),
+        keys[0].0.clone(),
+        DealMonitorConfig {
+            check_interval_blocks: 10,
+            renew_before_epochs: 200,
+        },
+    );
+
+    // Check at current_filecoin_epoch = 1000 (remaining = 100, < 200 threshold)
+    let needs_renewal = monitor.check_deals(1000).await;
+    assert_eq!(needs_renewal.len(), 1);
+    assert_eq!(needs_renewal[0], "bafyexpiring");
+
+    // Check at epoch 500 (remaining = 600, > 200 threshold)
+    let needs_renewal = monitor.check_deals(500).await;
+    assert!(needs_renewal.is_empty());
+}

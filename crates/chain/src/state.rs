@@ -128,6 +128,27 @@ pub struct KeyEntry {
     pub last_rotated: Height,
 }
 
+/// A recorded Filecoin storage deal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DealEntry {
+    /// CID of the stored data.
+    pub data_cid: String,
+    /// Filecoin deal ID.
+    pub deal_id: u64,
+    /// Storage provider address.
+    pub provider: String,
+    /// Deal end epoch on Filecoin chain.
+    pub end_epoch: u64,
+    /// Whether this is a renewal.
+    pub is_renewal: bool,
+    /// Original merkle root.
+    pub merkle_root: [u8; 32],
+    /// Validator who recorded this deal.
+    pub validator_pk: [u8; 32],
+    /// Block height at which this was recorded.
+    pub recorded_at: Height,
+}
+
 /// A recorded anchor event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnchorEntry {
@@ -172,6 +193,9 @@ pub struct ChainState {
     /// Anchor history: epoch -> AnchorEntry.
     #[serde(default)]
     pub anchor_history: BTreeMap<u64, AnchorEntry>,
+    /// Filecoin deal registry: data_cid -> Vec<DealEntry> (multiple SPs per CID).
+    #[serde(default)]
+    pub deal_registry: BTreeMap<String, Vec<DealEntry>>,
 }
 
 impl ChainState {
@@ -188,6 +212,7 @@ impl ChainState {
             key_registry: BTreeMap::new(),
             blob_replicas: BTreeMap::new(),
             anchor_history: BTreeMap::new(),
+            deal_registry: BTreeMap::new(),
         }
     }
 
@@ -223,6 +248,12 @@ impl ChainState {
             let entry_bytes =
                 serde_json::to_vec(entry).expect("AnchorEntry serialization cannot fail");
             hasher.update(&entry_bytes);
+        }
+        for (cid, deals) in &self.deal_registry {
+            hasher.update(cid.as_bytes());
+            let deals_bytes =
+                serde_json::to_vec(deals).expect("DealEntry serialization cannot fail");
+            hasher.update(&deals_bytes);
         }
         *hasher.finalize().as_bytes()
     }
@@ -601,6 +632,48 @@ impl ChainState {
                         recorded_at: height,
                     },
                 );
+            }
+
+            Transaction::RenewDeal {
+                data_cid,
+                deal_id,
+                provider,
+                end_epoch,
+                is_renewal,
+                merkle_root,
+                validator_pk,
+                signature,
+            } => {
+                // Verify validator is in the current set
+                let addr = Address::from_public_key(validator_pk);
+                if self.validator_set.get_by_address(&addr).is_none() {
+                    return Err(StateError::Unauthorized);
+                }
+
+                // Verify signature
+                let mut msg = Vec::new();
+                msg.extend_from_slice(b"zk-vault:deal:");
+                msg.extend_from_slice(data_cid.as_bytes());
+                msg.extend_from_slice(&deal_id.to_le_bytes());
+                let msg_hash = blake3::hash(&msg);
+                verify_ed25519(validator_pk, msg_hash.as_bytes(), signature)?;
+
+                // Add deal entry
+                let entry = DealEntry {
+                    data_cid: data_cid.clone(),
+                    deal_id: *deal_id,
+                    provider: provider.clone(),
+                    end_epoch: *end_epoch,
+                    is_renewal: *is_renewal,
+                    merkle_root: *merkle_root,
+                    validator_pk: *validator_pk,
+                    recorded_at: height,
+                };
+
+                self.deal_registry
+                    .entry(data_cid.clone())
+                    .or_default()
+                    .push(entry);
             }
         }
 

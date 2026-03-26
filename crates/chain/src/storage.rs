@@ -27,6 +27,7 @@ const CF_KEYS: &str = "keys";
 const CF_BLOB_REPLICAS: &str = "blob_replicas";
 const CF_BLOCKS: &str = "blocks";
 const CF_ANCHORS: &str = "anchors";
+const CF_DEALS: &str = "deals";
 
 const META_HEIGHT: &[u8] = b"height";
 const META_LAST_BLOCK_ID: &[u8] = b"last_block_id";
@@ -74,6 +75,7 @@ impl Storage {
             ColumnFamilyDescriptor::new(CF_BLOB_REPLICAS, Options::default()),
             ColumnFamilyDescriptor::new(CF_BLOCKS, Options::default()),
             ColumnFamilyDescriptor::new(CF_ANCHORS, Options::default()),
+            ColumnFamilyDescriptor::new(CF_DEALS, Options::default()),
         ];
 
         let db = DB::open_cf_descriptors(&opts, path, cf_descriptors)?;
@@ -405,6 +407,25 @@ impl Storage {
         Ok(map)
     }
 
+    // ── Deal registry operations (CF: deals) ──
+
+    pub fn load_all_deals(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, Vec<crate::state::DealEntry>>> {
+        let cf = self.cf(CF_DEALS)?;
+        let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+        let mut map = std::collections::BTreeMap::new();
+        for item in iter {
+            let (key, value) = item?;
+            let cid = String::from_utf8(key.to_vec())
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let deals: Vec<crate::state::DealEntry> = serde_json::from_slice(&value)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            map.insert(cid, deals);
+        }
+        Ok(map)
+    }
+
     // ── Block history operations (CF: blocks) ──
 
     pub fn save_block(&self, height: Height, block: &crate::types::Block) -> Result<()> {
@@ -512,6 +533,14 @@ impl Storage {
             batch.put_cf(&cf_anchors, key, value);
         }
 
+        // Deal registry
+        let cf_deals = self.cf(CF_DEALS)?;
+        for (cid, deals) in &state.deal_registry {
+            let value = serde_json::to_vec(deals)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            batch.put_cf(&cf_deals, cid.as_bytes(), value);
+        }
+
         // Atomic write
         self.db.write(batch)?;
 
@@ -537,6 +566,7 @@ impl Storage {
         let key_registry = self.load_all_keys()?;
         let blob_replicas = self.load_all_blob_replicas()?;
         let anchor_history = self.load_all_anchors()?;
+        let deal_registry = self.load_all_deals()?;
 
         Ok(Some(crate::state::ChainState {
             height,
@@ -548,6 +578,7 @@ impl Storage {
             key_registry,
             blob_replicas,
             anchor_history,
+            deal_registry,
         }))
     }
 }

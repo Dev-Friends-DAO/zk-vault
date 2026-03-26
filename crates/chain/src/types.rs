@@ -255,6 +255,26 @@ pub enum Transaction {
         /// Ed25519 signature over BLAKE3("zk-vault:anchor:" || super_root || epoch_bytes).
         signature: Vec<u8>,
     },
+
+    /// Record a Filecoin deal creation or renewal.
+    RenewDeal {
+        /// CID of the stored data.
+        data_cid: String,
+        /// Filecoin deal ID.
+        deal_id: u64,
+        /// Storage provider address (e.g., "f01234").
+        provider: String,
+        /// Deal end epoch on Filecoin chain.
+        end_epoch: u64,
+        /// Whether this is a new deal or renewal of existing.
+        is_renewal: bool,
+        /// Original merkle root this data belongs to.
+        merkle_root: [u8; 32],
+        /// Validator who created/monitored the deal.
+        validator_pk: [u8; 32],
+        /// Ed25519 signature over BLAKE3("zk-vault:deal:" || data_cid || deal_id bytes).
+        signature: Vec<u8>,
+    },
 }
 
 impl Transaction {
