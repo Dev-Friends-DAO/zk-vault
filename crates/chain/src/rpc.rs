@@ -238,6 +238,25 @@ pub struct ListDealsResponse {
     pub total: usize,
 }
 
+/// Endowment pool status response.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EndowmentStatusResponse {
+    pub pool_balance: u64,
+    pub total_deposited: u64,
+    pub total_distributed: u64,
+    pub distribution_rate: u64,
+    pub last_decay_epoch: u64,
+    pub estimated_lifespan_years: f64,
+    pub validator_rewards: Vec<ValidatorRewardEntry>,
+}
+
+/// Validator reward entry.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ValidatorRewardEntry {
+    pub validator_pk: String,
+    pub accumulated_reward: u64,
+}
+
 /// Generic error response.
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
@@ -272,6 +291,7 @@ pub fn router(node: SharedNode) -> Router {
         .route("/list_anchors", get(handle_list_anchors))
         .route("/get_deals", post(handle_get_deals))
         .route("/list_deals", get(handle_list_deals))
+        .route("/endowment_status", get(handle_endowment_status))
         .with_state(node)
 }
 
@@ -303,6 +323,7 @@ pub fn router_with_sync(state: RpcState) -> Router {
         .route("/list_anchors", get(handle_list_anchors_v2))
         .route("/get_deals", post(handle_get_deals_v2))
         .route("/list_deals", get(handle_list_deals_v2))
+        .route("/endowment_status", get(handle_endowment_status_v2))
         .with_state(state)
 }
 
@@ -654,6 +675,31 @@ async fn handle_list_deals(State(node): State<SharedNode>) -> Json<ListDealsResp
     Json(ListDealsResponse { deals, total })
 }
 
+async fn handle_endowment_status(State(node): State<SharedNode>) -> Json<EndowmentStatusResponse> {
+    let node = node.lock().unwrap();
+    let pool = node.endowment_pool();
+    let lifespan = node.endowment_lifespan_estimate();
+
+    let validator_rewards: Vec<ValidatorRewardEntry> = pool
+        .validator_rewards
+        .iter()
+        .map(|(pk, reward)| ValidatorRewardEntry {
+            validator_pk: hex::encode(pk),
+            accumulated_reward: *reward,
+        })
+        .collect();
+
+    Json(EndowmentStatusResponse {
+        pool_balance: pool.balance,
+        total_deposited: pool.total_deposited,
+        total_distributed: pool.total_distributed,
+        distribution_rate: pool.distribution_rate,
+        last_decay_epoch: pool.last_decay_epoch,
+        estimated_lifespan_years: lifespan,
+        validator_rewards,
+    })
+}
+
 /// Parse a hex-encoded 32-byte public key from a request string.
 fn parse_pk(hex_str: &str) -> Result<[u8; 32], (StatusCode, Json<ErrorResponse>)> {
     let bytes = hex::decode(hex_str).map_err(|e| {
@@ -959,6 +1005,12 @@ async fn handle_get_deals_v2(
 
 async fn handle_list_deals_v2(State(state): State<RpcState>) -> Json<ListDealsResponse> {
     handle_list_deals(State(state.node)).await
+}
+
+async fn handle_endowment_status_v2(
+    State(state): State<RpcState>,
+) -> Json<EndowmentStatusResponse> {
+    handle_endowment_status(State(state.node)).await
 }
 
 #[cfg(test)]

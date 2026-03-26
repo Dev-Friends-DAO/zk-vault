@@ -275,6 +275,29 @@ pub enum Transaction {
         /// Ed25519 signature over BLAKE3("zk-vault:deal:" || data_cid || deal_id bytes).
         signature: Vec<u8>,
     },
+
+    /// Pay one-time storage fee for a backup (Mode B permanence).
+    /// 15% goes to validators immediately, 85% to the Endowment Pool.
+    Endow {
+        /// Merkle root of the backup being endowed.
+        merkle_root: [u8; 32],
+        /// Total amount paid (abstract units, u64).
+        amount: u64,
+        /// Payer's Ed25519 public key.
+        payer_pk: [u8; 32],
+        /// Ed25519 signature over BLAKE3("zk-vault:endow:" || merkle_root || amount_bytes).
+        signature: Vec<u8>,
+    },
+
+    /// Contribute funds to the Endowment Pool (anyone, any time).
+    DonateToEndowment {
+        /// Donation amount (abstract units, u64).
+        amount: u64,
+        /// Donor's Ed25519 public key.
+        donor_pk: [u8; 32],
+        /// Ed25519 signature over BLAKE3("zk-vault:donate:" || amount_bytes).
+        signature: Vec<u8>,
+    },
 }
 
 impl Transaction {

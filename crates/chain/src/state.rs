@@ -168,6 +168,88 @@ pub struct AnchorEntry {
     pub recorded_at: Height,
 }
 
+// ── Endowment types ──
+
+/// Configuration for the Endowment module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndowmentConfig {
+    /// Immediate validator share in basis points (1500 = 15%).
+    pub immediate_share_bps: u16,
+    /// Pool share in basis points (8500 = 85%).
+    pub pool_share_bps: u16,
+    /// Annual decay rate in basis points (3000 = 30%).
+    pub decay_rate_bps: u16,
+    /// Epoch length for decay application (in blocks).
+    pub decay_epoch_length: u64,
+    /// Minimum distribution rate per block (floor).
+    pub min_distribution_rate: u64,
+    /// Percentage of block rewards to endowment pool in bps (500 = 5%).
+    pub block_reward_pool_bps: u16,
+}
+
+impl Default for EndowmentConfig {
+    fn default() -> Self {
+        Self {
+            immediate_share_bps: 1500,
+            pool_share_bps: 8500,
+            decay_rate_bps: 3000,
+            decay_epoch_length: 100,
+            min_distribution_rate: 1,
+            block_reward_pool_bps: 500,
+        }
+    }
+}
+
+/// The Endowment Pool state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndowmentPool {
+    /// Current pool balance (abstract units).
+    pub balance: u64,
+    /// Total amount ever deposited into the pool.
+    pub total_deposited: u64,
+    /// Total amount ever distributed from the pool.
+    pub total_distributed: u64,
+    /// Current distribution rate per block (abstract units).
+    pub distribution_rate: u64,
+    /// Last epoch at which decay was applied.
+    pub last_decay_epoch: u64,
+    /// Per-validator accumulated rewards: validator_pk -> accumulated_reward.
+    #[serde(with = "hex_key_map")]
+    pub validator_rewards: BTreeMap<[u8; 32], u64>,
+}
+
+/// Custom serde for `BTreeMap<[u8; 32], u64>` using hex-encoded string keys.
+mod hex_key_map {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S>(map: &BTreeMap<[u8; 32], u64>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let string_map: BTreeMap<String, u64> =
+            map.iter().map(|(k, v)| (hex::encode(k), *v)).collect();
+        string_map.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<BTreeMap<[u8; 32], u64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let string_map: BTreeMap<String, u64> = BTreeMap::deserialize(deserializer)?;
+        string_map
+            .into_iter()
+            .map(|(k, v)| {
+                let bytes = hex::decode(&k).map_err(serde::de::Error::custom)?;
+                let arr: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| serde::de::Error::custom("expected 32 bytes"))?;
+                Ok((arr, v))
+            })
+            .collect()
+    }
+}
+
 // ── Chain State ──
 
 /// The full chain state.
@@ -196,6 +278,12 @@ pub struct ChainState {
     /// Filecoin deal registry: data_cid -> Vec<DealEntry> (multiple SPs per CID).
     #[serde(default)]
     pub deal_registry: BTreeMap<String, Vec<DealEntry>>,
+    /// Endowment configuration.
+    #[serde(default)]
+    pub endowment_config: EndowmentConfig,
+    /// Endowment Pool state.
+    #[serde(default)]
+    pub endowment_pool: EndowmentPool,
 }
 
 impl ChainState {
@@ -213,6 +301,8 @@ impl ChainState {
             blob_replicas: BTreeMap::new(),
             anchor_history: BTreeMap::new(),
             deal_registry: BTreeMap::new(),
+            endowment_config: EndowmentConfig::default(),
+            endowment_pool: EndowmentPool::default(),
         }
     }
 
@@ -255,6 +345,9 @@ impl ChainState {
                 serde_json::to_vec(deals).expect("DealEntry serialization cannot fail");
             hasher.update(&deals_bytes);
         }
+        let endowment_bytes = serde_json::to_vec(&self.endowment_pool)
+            .expect("EndowmentPool serialization cannot fail");
+        hasher.update(&endowment_bytes);
         *hasher.finalize().as_bytes()
     }
 
@@ -291,6 +384,9 @@ impl ChainState {
         for tx in &block.transactions {
             self.apply_tx(tx, block.header.height)?;
         }
+
+        // Distribute endowment rewards for this block
+        self.distribute_endowment();
 
         // Update chain metadata
         self.height = block.header.height;
@@ -675,9 +771,167 @@ impl ChainState {
                     .or_default()
                     .push(entry);
             }
+
+            Transaction::Endow {
+                merkle_root,
+                amount,
+                payer_pk,
+                signature,
+            } => {
+                // Verify signature
+                let mut msg = Vec::new();
+                msg.extend_from_slice(b"zk-vault:endow:");
+                msg.extend_from_slice(merkle_root);
+                msg.extend_from_slice(&amount.to_le_bytes());
+                let msg_hash = blake3::hash(&msg);
+                verify_ed25519(payer_pk, msg_hash.as_bytes(), signature)?;
+
+                // File must be registered
+                if !self.file_registry.contains_key(merkle_root) {
+                    return Err(StateError::FileNotFound(hex::encode(&merkle_root[..8])));
+                }
+
+                // Split: immediate_share to validators, rest to pool
+                let immediate = (*amount as u128
+                    * self.endowment_config.immediate_share_bps as u128
+                    / 10_000) as u64;
+                let to_pool = amount.saturating_sub(immediate);
+
+                // Distribute immediate share equally among current validators
+                let validator_count = self.validator_set.validators.len() as u64;
+                if validator_count > 0 && immediate > 0 {
+                    let per_validator = immediate / validator_count;
+                    for v in &self.validator_set.validators {
+                        *self
+                            .endowment_pool
+                            .validator_rewards
+                            .entry(v.public_key)
+                            .or_insert(0) += per_validator;
+                    }
+                }
+
+                // Add to pool
+                self.endowment_pool.balance += to_pool;
+                self.endowment_pool.total_deposited += to_pool;
+
+                // Set initial distribution rate if this is the first deposit
+                if self.endowment_pool.distribution_rate == 0 && to_pool > 0 {
+                    // Start with a rate that would distribute the pool over ~1 year
+                    // assuming decay_epoch_length blocks per epoch
+                    let epochs_per_year = 365 * 24 * 60; // ~525,600 minutes
+                    self.endowment_pool.distribution_rate = to_pool / epochs_per_year.max(1);
+                    if self.endowment_pool.distribution_rate == 0 {
+                        self.endowment_pool.distribution_rate = 1;
+                    }
+                }
+            }
+
+            Transaction::DonateToEndowment {
+                amount,
+                donor_pk,
+                signature,
+            } => {
+                // Verify signature
+                let mut msg = Vec::new();
+                msg.extend_from_slice(b"zk-vault:donate:");
+                msg.extend_from_slice(&amount.to_le_bytes());
+                let msg_hash = blake3::hash(&msg);
+                verify_ed25519(donor_pk, msg_hash.as_bytes(), signature)?;
+
+                // Add to pool
+                self.endowment_pool.balance += *amount;
+                self.endowment_pool.total_deposited += *amount;
+            }
         }
 
         Ok(())
+    }
+
+    /// Distribute endowment rewards for a block.
+    /// Called after applying all transactions in a block.
+    /// Distributes from the pool to validators proportional to their blob storage.
+    pub fn distribute_endowment(&mut self) {
+        if self.endowment_pool.balance == 0 || self.endowment_pool.distribution_rate == 0 {
+            return;
+        }
+
+        // Apply Kryder's Law decay at epoch boundaries
+        let current_epoch = self.height.0 / self.endowment_config.decay_epoch_length.max(1);
+        if current_epoch > self.endowment_pool.last_decay_epoch
+            && self.endowment_config.decay_epoch_length > 0
+        {
+            let epochs_elapsed = current_epoch - self.endowment_pool.last_decay_epoch;
+            for _ in 0..epochs_elapsed {
+                let decay = (self.endowment_pool.distribution_rate as u128
+                    * self.endowment_config.decay_rate_bps as u128
+                    / 10_000) as u64;
+                self.endowment_pool.distribution_rate = self
+                    .endowment_pool
+                    .distribution_rate
+                    .saturating_sub(decay)
+                    .max(self.endowment_config.min_distribution_rate);
+            }
+            self.endowment_pool.last_decay_epoch = current_epoch;
+        }
+
+        // Calculate this block's distribution
+        let block_distribution = self
+            .endowment_pool
+            .distribution_rate
+            .min(self.endowment_pool.balance);
+
+        if block_distribution == 0 {
+            return;
+        }
+
+        // Distribute proportional to blob storage
+        // Use blob_replicas to determine how much each validator stores
+        let mut validator_storage: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+        for replicas in self.blob_replicas.values() {
+            for pk in replicas {
+                *validator_storage.entry(*pk).or_insert(0) += 1;
+            }
+        }
+
+        let total_storage: u64 = validator_storage.values().sum();
+        if total_storage == 0 {
+            // No data stored, distribute equally among validators as fallback
+            let validator_count = self.validator_set.validators.len() as u64;
+            if validator_count > 0 {
+                let per_validator = block_distribution / validator_count;
+                if per_validator > 0 {
+                    for v in &self.validator_set.validators {
+                        *self
+                            .endowment_pool
+                            .validator_rewards
+                            .entry(v.public_key)
+                            .or_insert(0) += per_validator;
+                    }
+                    let distributed = per_validator * validator_count;
+                    self.endowment_pool.balance -= distributed;
+                    self.endowment_pool.total_distributed += distributed;
+                }
+            }
+            return;
+        }
+
+        // Proportional distribution
+        let mut total_paid = 0u64;
+        for (pk, storage) in &validator_storage {
+            let share =
+                (block_distribution as u128 * *storage as u128 / total_storage as u128) as u64;
+            if share > 0 {
+                *self
+                    .endowment_pool
+                    .validator_rewards
+                    .entry(*pk)
+                    .or_insert(0) += share;
+                total_paid += share;
+            }
+        }
+
+        self.endowment_pool.balance -= total_paid;
+        self.endowment_pool.total_distributed += total_paid;
     }
 }
 

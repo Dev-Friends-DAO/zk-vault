@@ -1563,3 +1563,255 @@ async fn deal_monitor_detects_expiry() {
     let needs_renewal = monitor.check_deals(500).await;
     assert!(needs_renewal.is_empty());
 }
+
+/// M: Endow transaction and pool funding.
+#[tokio::test]
+async fn endow_tx_funds_pool() {
+    let net = TestNetwork::spawn(3).await;
+    let (sk, pk) = &net.keys[0];
+
+    // Register a file first
+    let merkle_root = [0xE1; 32];
+    let tx = make_register_tx(sk, pk, merkle_root);
+    net.nodes[0].lock().unwrap().submit_tx(tx).unwrap();
+    net.propose_and_broadcast();
+
+    // Endow the file with 10,000 units
+    let amount = 10_000u64;
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"zk-vault:endow:");
+    msg.extend_from_slice(&merkle_root);
+    msg.extend_from_slice(&amount.to_le_bytes());
+    let msg_hash = blake3::hash(&msg);
+    let sig = sk.sign(msg_hash.as_bytes());
+
+    let tx = Transaction::Endow {
+        merkle_root,
+        amount,
+        payer_pk: *pk,
+        signature: sig.to_bytes().to_vec(),
+    };
+    net.nodes[0].lock().unwrap().submit_tx(tx).unwrap();
+    net.propose_and_broadcast();
+
+    // Verify pool state on all nodes
+    for node in &net.nodes {
+        let n = node.lock().unwrap();
+        let pool = n.endowment_pool();
+
+        // 85% of 10,000 = 8,500 to pool (minus any per-block distribution)
+        assert!(
+            pool.total_deposited >= 8_500,
+            "Pool should have received ~85% deposit"
+        );
+        assert!(pool.balance > 0, "Pool balance should be positive");
+        assert!(
+            pool.distribution_rate > 0,
+            "Distribution rate should be set"
+        );
+
+        // 15% of 10,000 = 1,500 split among 3 validators = 500 each
+        let total_immediate_rewards: u64 = pool.validator_rewards.values().sum();
+        assert!(
+            total_immediate_rewards > 0,
+            "Validators should have received immediate rewards"
+        );
+    }
+
+    // State roots match
+    let roots: Vec<_> = net
+        .nodes
+        .iter()
+        .map(|n| n.lock().unwrap().state_root())
+        .collect();
+    assert_eq!(roots[0], roots[1]);
+    assert_eq!(roots[1], roots[2]);
+}
+
+/// M: DonateToEndowment transaction.
+#[tokio::test]
+async fn donate_to_endowment() {
+    let net = TestNetwork::spawn(3).await;
+    let (sk, pk) = &net.keys[0];
+
+    // Donate 50,000 units to the pool
+    let amount = 50_000u64;
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"zk-vault:donate:");
+    msg.extend_from_slice(&amount.to_le_bytes());
+    let msg_hash = blake3::hash(&msg);
+    let sig = sk.sign(msg_hash.as_bytes());
+
+    let tx = Transaction::DonateToEndowment {
+        amount,
+        donor_pk: *pk,
+        signature: sig.to_bytes().to_vec(),
+    };
+    net.nodes[0].lock().unwrap().submit_tx(tx).unwrap();
+    net.propose_and_broadcast();
+
+    // Verify pool received the full donation (no split for donations)
+    for node in &net.nodes {
+        let n = node.lock().unwrap();
+        let pool = n.endowment_pool();
+        assert_eq!(
+            pool.total_deposited, 50_000,
+            "Full donation should go to pool"
+        );
+    }
+}
+
+/// M: Per-block distribution to validators.
+#[tokio::test]
+async fn endowment_per_block_distribution() {
+    let net = TestNetwork::spawn(3).await;
+    let (sk, pk) = &net.keys[0];
+
+    // Register a file
+    let merkle_root = [0xE2; 32];
+    let tx = make_register_tx(sk, pk, merkle_root);
+    net.nodes[0].lock().unwrap().submit_tx(tx).unwrap();
+    net.propose_and_broadcast();
+
+    // Add blob replicas so validators have storage to be rewarded for
+    {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"zk-vault:storage-status:");
+        msg.extend_from_slice(b"endow-test-blob");
+        msg.push(1u8);
+        let msg_hash = blake3::hash(&msg);
+        let sig = sk.sign(msg_hash.as_bytes());
+
+        let tx = Transaction::UpdateStorageStatus {
+            blob_key: "endow-test-blob".to_string(),
+            validator_pk: *pk,
+            holds_blob: true,
+            signature: sig.to_bytes().to_vec(),
+        };
+        net.nodes[0].lock().unwrap().submit_tx(tx).unwrap();
+        net.propose_and_broadcast();
+    }
+
+    // Endow with a large amount
+    let amount = 1_000_000u64;
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"zk-vault:endow:");
+    msg.extend_from_slice(&merkle_root);
+    msg.extend_from_slice(&amount.to_le_bytes());
+    let msg_hash = blake3::hash(&msg);
+    let sig = sk.sign(msg_hash.as_bytes());
+
+    let endow_tx = Transaction::Endow {
+        merkle_root,
+        amount,
+        payer_pk: *pk,
+        signature: sig.to_bytes().to_vec(),
+    };
+    net.nodes[0].lock().unwrap().submit_tx(endow_tx).unwrap();
+    net.propose_and_broadcast();
+
+    let pool_after_endow = {
+        let n = net.nodes[0].lock().unwrap();
+        n.endowment_pool().clone()
+    };
+
+    // Commit a few more empty blocks to trigger distribution
+    for _ in 0..5 {
+        net.propose_and_broadcast();
+    }
+
+    // Pool balance should have decreased (rewards distributed)
+    let pool_after_blocks = {
+        let n = net.nodes[0].lock().unwrap();
+        n.endowment_pool().clone()
+    };
+
+    assert!(
+        pool_after_blocks.total_distributed > pool_after_endow.total_distributed,
+        "Distribution should have occurred over multiple blocks"
+    );
+    assert!(
+        pool_after_blocks.balance < pool_after_endow.balance,
+        "Pool balance should decrease as rewards are distributed"
+    );
+}
+
+/// M: Endowment status RPC endpoint.
+#[tokio::test]
+async fn endowment_status_rpc() {
+    let net = TestNetwork::spawn(3).await;
+    let client = reqwest::Client::new();
+    let (sk, pk) = &net.keys[0];
+    let base = &net.urls[0];
+
+    // Donate to create a non-empty pool
+    let amount = 100_000u64;
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"zk-vault:donate:");
+    msg.extend_from_slice(&amount.to_le_bytes());
+    let msg_hash = blake3::hash(&msg);
+    let sig = sk.sign(msg_hash.as_bytes());
+
+    let tx = Transaction::DonateToEndowment {
+        amount,
+        donor_pk: *pk,
+        signature: sig.to_bytes().to_vec(),
+    };
+    net.nodes[0].lock().unwrap().submit_tx(tx).unwrap();
+    net.propose_and_broadcast();
+
+    // Query endowment_status
+    let resp: rpc::EndowmentStatusResponse = client
+        .get(format!("{base}/endowment_status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.total_deposited, 100_000);
+    assert!(resp.pool_balance > 0);
+}
+
+/// M: Endow on unregistered file fails.
+#[tokio::test]
+async fn endow_unregistered_file_fails() {
+    let net = TestNetwork::spawn(3).await;
+    let (sk, pk) = &net.keys[0];
+
+    // Try to endow a file that doesn't exist
+    let merkle_root = [0xFF; 32];
+    let amount = 1000u64;
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"zk-vault:endow:");
+    msg.extend_from_slice(&merkle_root);
+    msg.extend_from_slice(&amount.to_le_bytes());
+    let msg_hash = blake3::hash(&msg);
+    let sig = sk.sign(msg_hash.as_bytes());
+
+    let tx = Transaction::Endow {
+        merkle_root,
+        amount,
+        payer_pk: *pk,
+        signature: sig.to_bytes().to_vec(),
+    };
+    net.nodes[0].lock().unwrap().submit_tx(tx).unwrap();
+
+    // Propose - the block should fail to apply because file doesn't exist
+    // Actually, in the current architecture, propose builds a block and on_decided
+    // applies it. If a tx fails, it affects the whole block.
+    // In practice, BlockBuilder would trial-apply and skip bad txs.
+    // For this test, just verify the state doesn't change.
+    let block = net.nodes[0].lock().unwrap().on_propose(0);
+    let _result = net.nodes[0].lock().unwrap().on_decided(block);
+
+    // The block may succeed (empty if tx was rejected during proposal)
+    // or fail if the bad tx was included. Either way, pool should be empty.
+    let n = net.nodes[0].lock().unwrap();
+    assert_eq!(
+        n.endowment_pool().total_deposited,
+        0,
+        "Pool should not receive funds for unregistered file"
+    );
+}

@@ -32,6 +32,8 @@ const CF_DEALS: &str = "deals";
 const META_HEIGHT: &[u8] = b"height";
 const META_LAST_BLOCK_ID: &[u8] = b"last_block_id";
 const META_VALIDATOR_SET: &[u8] = b"validator_set";
+const META_ENDOWMENT_CONFIG: &[u8] = b"endowment_config";
+const META_ENDOWMENT_POOL: &[u8] = b"endowment_pool";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -138,6 +140,44 @@ impl Storage {
                 let vs = serde_json::from_slice(&bytes)
                     .map_err(|e| StorageError::Serialization(e.to_string()))?;
                 Ok(Some(vs))
+            }
+            None => Ok(None),
+        }
+    }
+
+    // ── Endowment operations ──
+
+    pub fn save_endowment_config(&self, config: &crate::state::EndowmentConfig) -> Result<()> {
+        let json =
+            serde_json::to_vec(config).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.db.put(META_ENDOWMENT_CONFIG, json)?;
+        Ok(())
+    }
+
+    pub fn load_endowment_config(&self) -> Result<Option<crate::state::EndowmentConfig>> {
+        match self.db.get(META_ENDOWMENT_CONFIG)? {
+            Some(bytes) => {
+                let config = serde_json::from_slice(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(Some(config))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn save_endowment_pool(&self, pool: &crate::state::EndowmentPool) -> Result<()> {
+        let json =
+            serde_json::to_vec(pool).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.db.put(META_ENDOWMENT_POOL, json)?;
+        Ok(())
+    }
+
+    pub fn load_endowment_pool(&self) -> Result<Option<crate::state::EndowmentPool>> {
+        match self.db.get(META_ENDOWMENT_POOL)? {
+            Some(bytes) => {
+                let pool = serde_json::from_slice(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(Some(pool))
             }
             None => Ok(None),
         }
@@ -541,6 +581,14 @@ impl Storage {
             batch.put_cf(&cf_deals, cid.as_bytes(), value);
         }
 
+        // Endowment
+        let endowment_config_json = serde_json::to_vec(&state.endowment_config)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        batch.put(META_ENDOWMENT_CONFIG, endowment_config_json);
+        let endowment_pool_json = serde_json::to_vec(&state.endowment_pool)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        batch.put(META_ENDOWMENT_POOL, endowment_pool_json);
+
         // Atomic write
         self.db.write(batch)?;
 
@@ -567,6 +615,8 @@ impl Storage {
         let blob_replicas = self.load_all_blob_replicas()?;
         let anchor_history = self.load_all_anchors()?;
         let deal_registry = self.load_all_deals()?;
+        let endowment_config = self.load_endowment_config()?.unwrap_or_default();
+        let endowment_pool = self.load_endowment_pool()?.unwrap_or_default();
 
         Ok(Some(crate::state::ChainState {
             height,
@@ -579,6 +629,8 @@ impl Storage {
             blob_replicas,
             anchor_history,
             deal_registry,
+            endowment_config,
+            endowment_pool,
         }))
     }
 }

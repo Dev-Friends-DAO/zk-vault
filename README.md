@@ -21,7 +21,7 @@ No existing project combines all of zk-vault's pillars. The closest competitors 
 | Multi-mode (A/B/C) | **Personal + Native + Filecoin** | Chain-only | Filecoin-only | Centralized | Filecoin-only | Chain-only |
 | Layer 0 (local-first) | **Always independent** | No | No | No | No | No |
 | BTC + ETH anchoring | **Dual-chain Merkle root** | Babylon (chain-level) | No | No | No | No |
-| Endowment (pay-once) | **On-chain module** | Prepaid subscription | Yes | No | No (deals expire) | Yes |
+| Endowment (pay-once) | **Multi-source pool (Mode B)** | Prepaid subscription | Yes | No | No (deals expire) | Yes |
 | Guardian recovery | **Shamir SSS + PQ KEM encryption** | No | No | No | No | No |
 | ZKP (STARK, PQ-safe) | **Planned (risc0)** | No | No | No | zk-SNARKs (not PQ) | No |
 | Migration path | **Mode A→B/C, no re-encrypt** | No | No | No | No | No |
@@ -101,7 +101,7 @@ Personal Mode is fully functional on its own. Chain Mode adds guarantees that ar
 | Data integrity proof | Local hash chain | BTC/ETH anchoring |
 | Single point of failure | Provider + local | None |
 | Key recovery | Mnemonic (24-word) | Mnemonic + Guardian network |
-| Permanent storage | Provider-dependent | Endowment model |
+| Permanent storage | Provider-dependent | Endowment pool (Mode B) + Layer 0 safety net |
 | Multi-device sync | Manual | Chain state |
 
 Data encrypted in Personal Mode is fully compatible with Chain Mode — migration requires no re-encryption.

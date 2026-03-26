@@ -284,6 +284,37 @@ impl Node {
         &self.state.deal_registry
     }
 
+    /// Get the current endowment pool state.
+    pub fn endowment_pool(&self) -> &crate::state::EndowmentPool {
+        &self.state.endowment_pool
+    }
+
+    /// Get the endowment configuration.
+    pub fn endowment_config(&self) -> &crate::state::EndowmentConfig {
+        &self.state.endowment_config
+    }
+
+    /// Estimate how many years the endowment pool can sustain at current rates.
+    pub fn endowment_lifespan_estimate(&self) -> f64 {
+        let pool = &self.state.endowment_pool;
+        let config = &self.state.endowment_config;
+        if pool.distribution_rate == 0 || pool.balance == 0 {
+            return 0.0;
+        }
+        // Approximate: balance / (rate * blocks_per_year) accounting for decay
+        // With 30% annual decay, the geometric series sum is balance / (rate * 3.33)
+        let decay_factor = 1.0 - (config.decay_rate_bps as f64 / 10_000.0);
+        if decay_factor >= 1.0 || decay_factor <= 0.0 {
+            return pool.balance as f64 / pool.distribution_rate as f64;
+        }
+        // Sum of geometric series: rate / (1 - decay_factor)
+        let total_future_distribution = pool.distribution_rate as f64 / (1.0 - decay_factor);
+        if total_future_distribution <= 0.0 {
+            return 0.0;
+        }
+        pool.balance as f64 / total_future_distribution
+    }
+
     // ── Blob store operations (Mode B) ──
 
     /// Store an encrypted data blob. Returns the size in bytes.

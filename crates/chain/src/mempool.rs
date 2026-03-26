@@ -314,6 +314,22 @@ fn pre_validate(tx: &Transaction, state: &ChainState) -> Result<()> {
                 ));
             }
         }
+
+        Transaction::Endow { signature, .. } => {
+            if signature.len() != 64 {
+                return Err(MempoolError::Invalid(
+                    "Endow signature must be 64 bytes".into(),
+                ));
+            }
+        }
+
+        Transaction::DonateToEndowment { signature, .. } => {
+            if signature.len() != 64 {
+                return Err(MempoolError::Invalid(
+                    "DonateToEndowment signature must be 64 bytes".into(),
+                ));
+            }
+        }
     }
     Ok(())
 }

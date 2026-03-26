@@ -347,12 +347,17 @@ The consensus layer is built on a pluggable `ValidatorSelector` trait, allowing 
 - Manifests: `backup_id -> {files[], merkle_root, timestamp, anchors}`
 - MerkleRoots: historical record of all roots
 
-**Endowment Module**
-- Implements Arweave-like permanent storage economics on-chain
-- One-time payment → endowment fund → continuous validator rewards
-- Payment split: ~15% immediate to validators, ~85% to endowment pool
-- Endowment distributes rewards per-block based on data held
-- Based on the assumption that storage costs decline over time (Kryder's Law)
+**Endowment Module** (Mode B permanence)
+- Maximizes the probability of permanent data retention via economic incentives
+- Multiple funding sources for the pool:
+  - User `Endow` payment: one-time per backup (~15% immediate to validators, ~85% to pool)
+  - `DonateToEndowment` transaction: anyone can contribute to the pool at any time
+  - Block reward allocation: a percentage of block rewards flows to the pool automatically
+- Pool distributes rewards per-block to validators proportional to data they hold
+- Distribution rate decreases over time (Kryder's Law: storage costs decline ~30%/year)
+- Pool balance is part of ChainState (BFT-protected, not a separate contract)
+- **Not a guarantee of permanence** — it is the most economically rational long-term storage model. Layer 0 (local backup) remains the ultimate safety net independent of all economic models
+- Mode C (Filecoin) uses its own deal-based economics and does not depend on the Endowment Pool
 
 **Guardian Module**
 - Guardian sets per user: `{guardians[], threshold, share_commitments[]}`
@@ -385,6 +390,8 @@ The consensus layer is built on a pluggable `ValidatorSelector` trait, allowing 
 | `ApproveRecovery` | Guardian approves recovery by submitting their decrypted share |
 | `RevokeKeys` | Revoke current keys and register new ones (key rotation) |
 | `GuardianLiveness` | Submit periodic liveness proof |
+| `Endow` | Pay one-time storage fee for a backup (15/85 split to validators/pool) |
+| `DonateToEndowment` | Contribute funds to the Endowment Pool (anyone, any time) |
 
 **BFT properties:**
 - Safety: no two honest validators decide on conflicting states
@@ -473,27 +480,52 @@ Encrypted data is stored on Filecoin via storage deals with multiple Storage Pro
 
 **Filecoin's limitation:** Deals expire (180-540 days). The chain automates renewal, but active management is required. Filecoin is not permanent storage — it is verified rental storage.
 
-### Endowment Model (On-chain Permanence)
+### Endowment Model (On-chain Permanence for Mode B)
 
-Inspired by Arweave's economic model, but implemented as a chain module:
+Inspired by Arweave's economic model, but implemented as a chain module with multiple funding sources to maximize pool longevity.
+
+**Design philosophy:** The Endowment does not *guarantee* permanence — no economic model can. It *maximizes the probability* of permanent retention. Layer 0 (local backup) is the true safety net, independent of all economic models.
 
 ```
-User pays once
+Endowment Pool funding sources:
+
+1. User Endow payment (per backup)
     |
     +--> 15% to validators immediately (incentivize acceptance)
     |
-    +--> 85% to Endowment Pool (on-chain treasury)
-              |
-              +--> Per-block distribution to validators
-                   proportional to data they hold
-                   |
-                   +--> Distribution rate decreases over time
-                        (models declining storage costs)
+    +--> 85% to Endowment Pool
+
+2. DonateToEndowment (anyone, any time)
+    |
+    +--> 100% to Endowment Pool
+    |    (project team, sponsors, DAOs, individuals)
+
+3. Block reward allocation (automatic)
+    |
+    +--> N% of block rewards to Endowment Pool
+
+Pool outflow:
+    +--> Per-block distribution to validators
+         proportional to data they hold
+         |
+         +--> Distribution rate decreases over time
+              (models declining storage costs via Kryder's Law)
 ```
 
-**Assumption:** Storage hardware costs decline ~30% per year (Kryder's Law). The endowment is designed to outlast the data's useful life.
+**Assumption:** Storage hardware costs decline ~30% per year (Kryder's Law). With multiple inflow sources, the pool can sustain distribution even when user growth stalls.
 
-**Risk:** If the chain's token loses value or Kryder's Law reverses, the model breaks. Mitigation: Layer 0 (local backup) is always independent of this model.
+**Scope:** Mode B only. Mode C (Filecoin) uses its own deal-based payment model (FIL token) and does not draw from the Endowment Pool.
+
+**Risks and mitigations:**
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Kryder's Law reversal | Distribution rate exceeds cost reduction → pool drains faster | Minimum distribution rate floor; governance can adjust parameters |
+| Token value collapse | Validator rewards worth nothing in real terms | Layer 0 is independent; multi-source pool (donations, block rewards) provides buffer |
+| Zero user growth | No new Endow payments | Block reward allocation + donations continue; Kryder's Law reduces costs |
+| All risks combined | Pool eventually depletes | Layer 0 survives all economic scenarios — this is by design |
+
+**Tokenomics:** The Endowment uses abstract units internally. Token denomination and design are deferred to the DPoS phase to avoid premature lock-in.
 
 ### User Choice
 
@@ -904,12 +936,15 @@ Future consideration for protocol-level decisions:
 
 ### Tokenomics
 
-To be introduced at the appropriate phase. Core considerations:
-- Endowment payments (storage fees)
-- Validator rewards (block production + data storage)
-- Guardian incentives (liveness maintenance)
-- Staking and slashing (DPoS security)
-- Governance participation
+To be introduced at the DPoS phase. The Endowment module uses abstract units (`u64`) internally so that token design is not prematurely locked in. Core considerations:
+
+- **Endowment payments** (one-time storage fees for Mode B permanence)
+- **Endowment donations** (anyone can fund the pool at any time)
+- **Validator rewards** (block production + data storage, partially funded by Endowment Pool)
+- **Guardian incentives** (liveness maintenance)
+- **Staking and slashing** (DPoS economic security)
+- **Governance participation** (protocol parameter changes, including Endowment rates)
+- **Filecoin deal fees** (Mode C, paid in FIL — separate from the Endowment economy)
 
 ---
 
