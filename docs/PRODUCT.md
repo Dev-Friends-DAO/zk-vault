@@ -950,32 +950,66 @@ To be introduced at the DPoS phase. The Endowment module uses abstract units (`u
 
 ## 10. Roadmap
 
-> **Status: Under reconsideration.**
-> The following represents the current directional thinking, not a committed plan.
+> **Status: Refined (rev 3).** Integrates the original four-phase plan with the
+> permanence-economics and mutability decisions. Phases 1–2 are shipped. Phase 0
+> (strategy + design specs) is the current gate that reshapes Phases 2–5.
+>
+> **Organizing principle:** the new economic / permanence / mutability work is not a
+> separate track — it *deepens* Phase 2 (Endowment → permanent fund) and *reframes*
+> Phase 4 (scaling → permanence), and adds a governable-parameter layer across Phase 5.
+> Nothing from the original plan is dropped; several items are moved and extended.
 
-**Phase 1: Foundation**
-- Layer 0: CLI local encrypted backup (no server required)
-- Round-trip verification
-- Hash chain (each step recorded)
-- Write-ahead log for crash recovery
+### Phase 0 — Strategy & Design *(non-code, current)*
 
-**Phase 2: dApp Chain + Storage**
-- Chain with BFT consensus (PoA)
-- Mode B (native storage) + Mode C (Filecoin bridge)
-- Endowment module
-- Anchoring automation (BTC + ETH)
-- Replaces API server + PostgreSQL
+Decisions here reshape the downstream phases before any implementation.
 
-**Phase 3: Recovery + ZKP**
-- Guardian recovery system
-- ZKP integration (evaluated per use case)
-- Knowledge proofs for guardians
+- **Strategy gate:** fix the one-line differentiation axis and the custom-chain justification
+- **D1 — Economic model spec:** millennia-scale endowment — two regimes (early drawdown → late preserve-principal), a **sacrosanct principal** never touched by opex, a **diversified real-yield basket** (not the native token alone), a smoothed spend rule, and pessimistic pricing. **Includes the pricing function:** `price = f(size, mode, redundancy factor, permanence tier)` — the principal scales per-byte, so price is size-driven by construction; defines per-mode / permanent-tier **size-feasibility limits** and a minimum floor for tiny objects
+- **D2 — Business model spec:** sale margin + **treasury-send ratio (governable)**, sized against real opex. zk-vault's responsibility ends at **sending funds to the DAO treasury**; contributor distribution is done DAO-side (out of scope)
+- **D3 — Mutable / immutable boundary spec:** what is permanent (data commitments) vs governable (crypto suites, economic parameters, treasury %); the upgrade mechanism; **crypto-agility** (re-wrap the KEM layer under future PQ suites without touching bulk ciphertext)
 
-**Phase 4: Expansion**
-- Additional data sources (Gmail, Notion, GitHub)
-- Selective Disclosure
-- Scaling (erasure coding, sharding)
-- Tokenomics introduction
+### Phase 1 — Foundation ✅ *(shipped)*
+
+- Layer 0 CLI local encrypted backup, round-trip verification, hash chain, write-ahead log for crash recovery
+
+### Phase 2 — Chain + Storage ✅ *(feature-complete → deepening + hardening)*
+
+- **Shipped:** BFT (PoA), Mode B (native) + Mode C (Filecoin), Endowment module, BTC/ETH anchoring automation, RocksDB, JSON-RPC — replaces the API server + PostgreSQL
+- **Deepening (from D1/D2):** evolve the Endowment from a *simple pool* into a *permanent fund* — preserve-principal + diversified yield + smoothed spend rule + **treasury-send transaction** + **governable parameters**
+- **Hardening:** multi-node testnet E2E, fault injection, on-testnet anchoring
+
+### Phase 3 — Recovery + ZKP 🟡 *(partial)*
+
+- Guardian recovery ✅ (Shamir + PQ-encrypted shares + chain transactions)
+- **ZKP scoped to ONE risc0/STARK PoC** (not all 10 use cases); integrate its commitment into the anchor
+- **Knowledge proofs for guardians** (ZKP recovery challenge — prove a secret answer with no on-chain hash)
+- **Crypto-agility (from D3):** re-wrap the KEM layer under future PQ suites — required for millennia-scale confidentiality
+- Dead Man's Switch; guardian key rotation
+
+### Phase 4 — Permanence & Scale *(reframed from "Expansion / scaling")*
+
+Elevated from a scaling concern to the core of the millennia-permanence guarantee.
+
+- Reed-Solomon erasure coding across validators / regions / jurisdictions (also lifts the Mode B **large-data** ceiling)
+- **Self-healing migration:** detect lost or expired replicas → re-replicate from survivors
+- Permanent tier: Mode B + Mode C + Layer 0 simultaneously
+- Sharding; PoA → DPoS activation
+
+### Phase 5 — Ecosystem & Token
+
+- **Ongoing source expansion** (continuous, never a closed list): Gmail, Notion, GitHub, Dropbox, iCloud, Slack, local filesystems, databases, S3 buckets, … — added continuously via the pluggable `DataSource` trait in `core`
+- Selective Disclosure (depends on ZKP)
+- Access & auth extensions: session keys, external-wallet auth, YubiKey hardware key (carried from §9)
+- **Tokenomics — subordinate to the D1 economic model** (decide economics before denomination)
+- **DAO governance = governable-parameter control** (treasury %, endowment rates, crypto-suite upgrades)
+- Composability (insurance / legal / compliance verification)
+
+### Phase 6 — Horizon: Programmable Confidential Data Layer *(north star)*
+
+- The terminal vision: a general-purpose **confidential × post-quantum × storage-native** chain
+- **Invariant:** become general by *exposing existing primitives* (PQ crypto, durable storage, guardian recovery, anchoring, ZKP) as programmable — **not** by bolting on a generic VM
+- **Unlock condition:** the backup product has real traction + Phase 3 ZKP is in production
+- Explicitly **not** chasing generic DeFi / NFT / gaming / high-frequency trading
 
 ---
 
